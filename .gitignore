@@ -1,0 +1,9 @@
+# I忽略项目根目录
+/*
+
+# 保留unreal项目文件和源资源，白名单
+!/.gitignore
+!/EvilClownParadise.uproject
+!/Source/
+!/Content/
+!/Config/
