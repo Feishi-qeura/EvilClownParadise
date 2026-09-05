@@ -3,6 +3,7 @@
 #include "Misc/AutomationTest.h"
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineSessionRequestValidation.h"
+#include "FU_CheckSessionStatusAsync.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FFUOnlineSessionDefaultResultTest,
@@ -29,6 +30,17 @@ bool FFUOnlineSessionRequestValidationTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Reject zero players"), FFU_SessionRequestValidation::CanCreate(0, TEXT("Room")));
 	TestFalse(TEXT("Reject empty room name"), FFU_SessionRequestValidation::CanCreate(2, FString()));
 	TestTrue(TEXT("Accept a valid request"), FFU_SessionRequestValidation::CanCreate(2, TEXT("Room")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionPingNullWorldTest,
+	"FUOnlineSession.Ping.NullWorld",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionPingNullWorldTest::RunTest(const FString& Parameters)
+{
+	TestNull(TEXT("Null world context is rejected"), UFU_CheckSessionStatusAsync::FU_CheckSessionStatus(nullptr, 1.0f));
 	return true;
 }
 
