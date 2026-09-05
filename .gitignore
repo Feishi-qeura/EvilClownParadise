@@ -8,7 +8,6 @@
 !/Content/
 !/Config/
 !/Plugins/
-!/docs/
 
 # 插件目录同样只保留源码和配置，避免提交虚幻自动生成的构建产物。
 **/Binaries/
