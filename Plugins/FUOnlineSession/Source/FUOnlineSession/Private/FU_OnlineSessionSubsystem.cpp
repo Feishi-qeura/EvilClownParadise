@@ -54,7 +54,7 @@ APlayerController* UFU_OnlineSessionSubsystem::FU_GetLocalPlayerController() con
 	return nullptr;
 }
 
-void UFU_OnlineSessionSubsystem::FU_CreateCustomSession(const int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword, const bool bUseLobbiesIfAvailable)
+void UFU_OnlineSessionSubsystem::CreateCustomSession(const int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword, const bool bUseLobbiesIfAvailable)
 {
 	if (!FFU_SessionRequestValidation::CanCreate(MaxPlayers, RoomName))
 	{
@@ -80,7 +80,7 @@ void UFU_OnlineSessionSubsystem::FU_CreateCustomSession(const int32 MaxPlayers, 
 	}
 }
 
-void UFU_OnlineSessionSubsystem::FU_FindCustomSession(const FString& RoomName, const int32 MaxResults, const bool bUseLobbiesIfAvailable)
+void UFU_OnlineSessionSubsystem::FindCustomSession(const FString& RoomName, const int32 MaxResults, const bool bUseLobbiesIfAvailable)
 {
 	SessionInterface = FU_GetSessionInterface();
 	APlayerController* PlayerController = FU_GetLocalPlayerController();
@@ -108,7 +108,7 @@ void UFU_OnlineSessionSubsystem::FU_FindCustomSession(const FString& RoomName, c
 	}
 }
 
-void UFU_OnlineSessionSubsystem::FU_JoinCustomSession(const FString& RoomPasswordInput)
+void UFU_OnlineSessionSubsystem::JoinCustomSession(const FString& RoomPasswordInput)
 {
 	SessionInterface = FU_GetSessionInterface();
 	if (!SessionInterface.IsValid())
@@ -141,7 +141,7 @@ void UFU_OnlineSessionSubsystem::FU_JoinCustomSession(const FString& RoomPasswor
 	}
 }
 
-void UFU_OnlineSessionSubsystem::FU_DestroySession()
+void UFU_OnlineSessionSubsystem::DestroySession()
 {
 	SessionInterface = FU_GetSessionInterface();
 	if (!SessionInterface.IsValid() || !SessionInterface->GetNamedSession(NAME_GameSession))

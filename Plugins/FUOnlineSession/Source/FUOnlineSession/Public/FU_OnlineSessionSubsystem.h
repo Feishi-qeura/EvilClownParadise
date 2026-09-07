@@ -26,16 +26,16 @@ public:
 	FFU_OnJoinSessionComplete OnJoinSessionComplete;
 
 	UFUNCTION(BlueprintCallable, Category = "FU|Online Session")
-	void FU_CreateCustomSession(int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword, bool bUseLobbiesIfAvailable = false);
+	void  CreateCustomSession(int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword, bool bUseLobbiesIfAvailable = false);
 
 	UFUNCTION(BlueprintCallable, Category = "FU|Online Session")
-	void FU_FindCustomSession(const FString& RoomName, int32 MaxResults = 20, bool bUseLobbiesIfAvailable = false);
+	void FindCustomSession(const FString& RoomName, int32 MaxResults = 20, bool bUseLobbiesIfAvailable = false);
 
 	UFUNCTION(BlueprintCallable, Category = "FU|Online Session")
-	void FU_JoinCustomSession(const FString& RoomPasswordInput);
+	void JoinCustomSession(const FString& RoomPasswordInput);
 
 	UFUNCTION(BlueprintCallable, Category = "FU|Online Session")
-	void FU_DestroySession();
+	void DestroySession();
 
 private:
 	enum class EFU_PendingOperation : uint8

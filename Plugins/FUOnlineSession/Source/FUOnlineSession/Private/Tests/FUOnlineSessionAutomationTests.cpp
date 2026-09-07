@@ -20,10 +20,10 @@ bool FFUOnlineSessionDefaultResultTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FFUOnlineSessionRequestValidationTest,
-	"FUOnlineSession.Session.Validation",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST
+    (
+	FFUOnlineSessionRequestValidationTest,"FUOnlineSession.Session.Validation",EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter
+	)
 
 bool FFUOnlineSessionRequestValidationTest::RunTest(const FString& Parameters)
 {
@@ -40,7 +40,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FFUOnlineSessionPingNullWorldTest::RunTest(const FString& Parameters)
 {
-	TestNull(TEXT("Null world context is rejected"), UFU_CheckSessionStatusAsync::FU_CheckSessionStatus(nullptr, 1.0f));
+	TestNull(TEXT("空世界上下文被拒绝"), UFU_CheckSessionStatusAsync::FU_CheckSessionStatus(nullptr, 1.0f));
 	return true;
 }
 
