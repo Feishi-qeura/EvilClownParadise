@@ -9,6 +9,8 @@
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineSessionSubsystem.generated.h"
 
+// 【自包含声明】该头只通过指针接收 NetDriver；明确前置声明避免严格编译依赖 PCH 间接包含。
+class UNetDriver;
 
 
 

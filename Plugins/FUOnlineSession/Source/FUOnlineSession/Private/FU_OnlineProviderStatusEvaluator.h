@@ -21,6 +21,15 @@ struct FFU_OnlineProviderStatusInputs
 	bool bHasNetDriverDefinition = false;
 	bool bHasNetDriverClass = false;
 	bool bHasConflictingActiveNetDriver = false;
+
+	// Steam 专属环境在调用者处一次性采样；Evaluator 保持纯函数，LAN 不读取这些字段。
+	bool bSteamAppIdBootstrapReady = false;
+	bool bSteamSocketsModuleAvailable = false;
+	bool bSteamSocketsEnabled = false;
+	bool bSteamSocketsSocketSubsystemAvailable = false;
+	bool bShippingBuild = false;
+	bool bShippingSteamAppIdExpected = false;
+	bool bSteamAppIdMatchesExpectation = false;
 };
 
 /** 只负责状态分类，不保存数据，也不会调用任何异步 OnlineSubsystem 操作。 */
@@ -65,10 +74,32 @@ public:
 			return EFU_OnlineProviderStatusCode::ActiveNetDriverConflict;
 		}
 
+		// 【故障顺序】通用 World/OSS/Session/NetDriver 前置先报告，随后 LAN 立即 Ready；
+		// Steam 专属探针绝不影响 NULL/LAN，Steam 则按 Bootstrap->Sockets->Identity->AppID 顺序报告最早故障。
 		// NULL/LAN 只依赖 Session Interface，不需要平台账号身份。
 		if (Provider == EFU_OnlineProvider::Lan)
 		{
 			return EFU_OnlineProviderStatusCode::Ready;
+		}
+
+		if (!Inputs.bSteamAppIdBootstrapReady)
+		{
+			return EFU_OnlineProviderStatusCode::SteamAppIdBootstrapInvalid;
+		}
+
+		if (!Inputs.bSteamSocketsModuleAvailable)
+		{
+			return EFU_OnlineProviderStatusCode::SteamSocketsModuleUnavailable;
+		}
+
+		if (!Inputs.bSteamSocketsEnabled)
+		{
+			return EFU_OnlineProviderStatusCode::SteamSocketsDisabled;
+		}
+
+		if (!Inputs.bSteamSocketsSocketSubsystemAvailable)
+		{
+			return EFU_OnlineProviderStatusCode::SteamSocketsSocketSubsystemUnavailable;
 		}
 
 		if (!Inputs.bHasIdentityInterface)
@@ -79,6 +110,16 @@ public:
 		if (!Inputs.bIsLoggedIn)
 		{
 			return EFU_OnlineProviderStatusCode::NotLoggedIn;
+		}
+
+		if (Inputs.bShippingBuild && !Inputs.bShippingSteamAppIdExpected)
+		{
+			return EFU_OnlineProviderStatusCode::ShippingSteamAppIdMissing;
+		}
+
+		if (!Inputs.bSteamAppIdMatchesExpectation)
+		{
+			return EFU_OnlineProviderStatusCode::SteamAppIdMismatch;
 		}
 
 		return EFU_OnlineProviderStatusCode::Ready;

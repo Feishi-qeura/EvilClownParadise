@@ -1,6 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+// 【自包含编译】FTimerHandle 是按值成员，不能仅靠 PCH 的间接声明；直接包含其完整定义。
+#include "TimerManager.h"
 #include "Kismet/BlueprintAsyncActionBase.h"
 #include "FU_CheckSessionStatusAsync.generated.h"
 

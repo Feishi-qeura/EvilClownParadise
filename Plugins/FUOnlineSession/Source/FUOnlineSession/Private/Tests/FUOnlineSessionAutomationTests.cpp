@@ -5,6 +5,7 @@
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineSessionRequestValidation.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
+#include "FU_SteamAppIdBootstrap.h"
 #include "FU_CheckSessionStatusAsync.h"
 #include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
 
@@ -42,8 +43,14 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFUOnlineSessionProviderStatusEvaluationTest,"F
 
 bool FFUOnlineSessionProviderStatusEvaluationTest::RunTest(const FString& Parameters)
 {
-	//测试少子系统时，误报成后续的接口或登录错误
+	// 【FU 状态顺序】World 是所有 OnlineSubsystem 查询的根前置条件，必须先于后续依赖失败。
 	FFU_OnlineProviderStatusInputs Inputs;
+	TestEqual(
+		TEXT("缺少 World 时返回 WorldUnavailable"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::WorldUnavailable);
+
+	//测试少子系统时，误报成后续的接口或登录错误
 	Inputs.bHasWorld = true;
 	Inputs.bHasSubsystem = false;
 
@@ -66,6 +73,12 @@ bool FFUOnlineSessionProviderStatusEvaluationTest::RunTest(const FString& Parame
 	Inputs.bHasNetDriverClass = true;
 	Inputs.bHasIdentityInterface = false;
 	Inputs.bIsLoggedIn = false;
+	// 【Steam 运行环境快照】本测试要继续验证旧的 Identity 顺序，所以先让新增前置全部就绪。
+	Inputs.bSteamAppIdBootstrapReady = true;
+	Inputs.bSteamSocketsModuleAvailable = true;
+	Inputs.bSteamSocketsEnabled = true;
+	Inputs.bSteamSocketsSocketSubsystemAvailable = true;
+	Inputs.bSteamAppIdMatchesExpectation = true;
 
 	TestEqual(
 		TEXT("LAN 不要求 Identity 登录"),
@@ -188,6 +201,12 @@ bool FFUOnlineSessionProviderNetDriverStatusTest::RunTest(const FString& Paramet
 	Inputs.bHasSessionInterface = true;
 	Inputs.bHasIdentityInterface = true;
 	Inputs.bIsLoggedIn = true;
+	// 【测试隔离】这里专门覆盖 NetDriver 顺序，Steam 的新增环境前置必须全部满足。
+	Inputs.bSteamAppIdBootstrapReady = true;
+	Inputs.bSteamSocketsModuleAvailable = true;
+	Inputs.bSteamSocketsEnabled = true;
+	Inputs.bSteamSocketsSocketSubsystemAvailable = true;
+	Inputs.bSteamAppIdMatchesExpectation = true;
 
 	// Session/Identity 正常并不代表可以联网；GameNetDriver 定义缺失时必须阻止按钮继续执行。
 	Inputs.bHasNetDriverDefinition = true;
@@ -218,6 +237,125 @@ bool FFUOnlineSessionProviderNetDriverStatusTest::RunTest(const FString& Paramet
 		TEXT("NetDriver 与 Provider 依赖全部存在时才返回 Ready"),
 		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
 		EFU_OnlineProviderStatusCode::Ready);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionAppIdBootstrapTest,
+	"FUOnlineSession.AppIdBootstrap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionAppIdBootstrapTest::RunTest(const FString& Parameters)
+{
+	// 【纯快照测试】不读取真实 Steam 客户端或 ini；每个输入都对应启动期的一个可复现分支。
+	TestEqual(
+		TEXT("False Add is not bootstrap success"),
+		FFU_SteamAppIdBootstrap::Evaluate({ false, false, true, false, true, 480, 480 }),
+		EFU_SteamBootstrapStatus::LayerAddFailed);
+
+	TestEqual(
+		TEXT("Existing Steam fails closed"),
+		FFU_SteamAppIdBootstrap::Evaluate({ false, true, true, false, false, 480, 0 }),
+		EFU_SteamBootstrapStatus::SteamAlreadyInstantiated);
+
+	TestEqual(
+		TEXT("Shipping never injects a development layer"),
+		FFU_SteamAppIdBootstrap::Evaluate({ true, false, false, false, false, 0, 0 }),
+		EFU_SteamBootstrapStatus::ShippingNoInjection);
+
+	TestEqual(
+		TEXT("非 Shipping 的非法开发 AppID 必须失败"),
+		FFU_SteamAppIdBootstrap::Evaluate({ false, false, true, true, true, 0, 0 }),
+		EFU_SteamBootstrapStatus::InvalidDevelopmentAppId);
+
+	TestEqual(
+		TEXT("缺少 Engine 配置分支必须失败"),
+		FFU_SteamAppIdBootstrap::Evaluate({ false, false, false, false, false, 480, 0 }),
+		EFU_SteamBootstrapStatus::BranchUnavailable);
+
+	TestEqual(
+		TEXT("不属于当前 Engine 分支的同标签层必须失败"),
+		FFU_SteamAppIdBootstrap::Evaluate({ false, false, true, true, false, 480, 480 }),
+		EFU_SteamBootstrapStatus::LayerOwnershipConflict);
+
+	TestEqual(
+		TEXT("读回 AppID 不一致必须失败"),
+		FFU_SteamAppIdBootstrap::Evaluate({ false, false, true, true, true, 480, 481 }),
+		EFU_SteamBootstrapStatus::EffectiveValueConflict);
+
+	TestEqual(
+		TEXT("完整非 Shipping 注入快照才 Ready"),
+		FFU_SteamAppIdBootstrap::Evaluate({ false, false, true, true, true, 480, 480 }),
+		EFU_SteamBootstrapStatus::Ready);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionSteamSocketsStatusTest,
+	"FUOnlineSession.ProviderStatus.SteamSockets",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionSteamSocketsStatusTest::RunTest(const FString& Parameters)
+{
+	// 【共享基线】先让旧依赖都满足，后续每个断言只切断一层新增 Steam 前置。
+	FFU_OnlineProviderStatusInputs Inputs;
+	Inputs.bHasWorld = true;
+	Inputs.bHasSubsystem = true;
+	Inputs.bHasSessionInterface = true;
+	Inputs.bHasNetDriverDefinition = true;
+	Inputs.bHasNetDriverClass = true;
+	Inputs.bHasIdentityInterface = true;
+	Inputs.bIsLoggedIn = true;
+	Inputs.bSteamAppIdBootstrapReady = true;
+	Inputs.bSteamSocketsModuleAvailable = false;
+	Inputs.bSteamSocketsEnabled = false;
+	Inputs.bSteamSocketsSocketSubsystemAvailable = false;
+	Inputs.bSteamAppIdMatchesExpectation = true;
+
+	TestEqual(
+		TEXT("缺少 SteamSockets 模块必须阻止 Steam"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::SteamSocketsModuleUnavailable);
+	TestEqual(
+		TEXT("SteamSockets outage does not block LAN"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Lan, Inputs),
+		EFU_OnlineProviderStatusCode::Ready);
+
+	Inputs.bSteamSocketsModuleAvailable = true;
+	TestEqual(
+		TEXT("Disabled SteamSockets blocks Steam"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::SteamSocketsDisabled);
+
+	Inputs.bSteamSocketsEnabled = true;
+	TestEqual(
+		TEXT("缺少命名 SteamSockets SocketSubsystem 必须阻止 Steam"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::SteamSocketsSocketSubsystemUnavailable);
+
+	Inputs.bSteamSocketsSocketSubsystemAvailable = true;
+	Inputs.bSteamAppIdBootstrapReady = false;
+	TestEqual(
+		TEXT("开发 AppID Bootstrap 不可用必须优先报告"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::SteamAppIdBootstrapInvalid);
+
+	Inputs.bSteamAppIdBootstrapReady = true;
+	Inputs.bShippingBuild = true;
+	Inputs.bShippingSteamAppIdExpected = false;
+	TestEqual(
+		TEXT("Shipping 缺少预期 Steam AppID 必须阻止 Steam"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::ShippingSteamAppIdMissing);
+
+	Inputs.bShippingSteamAppIdExpected = true;
+	Inputs.bSteamAppIdMatchesExpectation = false;
+	TestEqual(
+		TEXT("Steam AppID 不匹配必须阻止 Steam"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::SteamAppIdMismatch);
 
 	return true;
 }

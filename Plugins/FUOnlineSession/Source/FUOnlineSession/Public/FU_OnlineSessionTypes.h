@@ -77,7 +77,25 @@ enum class EFU_OnlineProviderStatusCode : uint8
 	NetDriverClassUnavailable UMETA(DisplayName = "NetDriver Class Unavailable"),
 
 	//当前 World 已经使用另一种驱动联网，必须先退出该网络世界才能切换 Provider
-	ActiveNetDriverConflict UMETA(DisplayName = "Active NetDriver Conflict")
+	ActiveNetDriverConflict UMETA(DisplayName = "Active NetDriver Conflict"),
+
+	//Runtime 开发 AppID 动态层未通过所有权与有效值验证；Steam 不得继续实例化
+	SteamAppIdBootstrapInvalid UMETA(DisplayName = "Steam AppID Bootstrap Invalid"),
+
+	//SteamSockets 插件模块无法非致命加载
+	SteamSocketsModuleUnavailable UMETA(DisplayName = "SteamSockets Module Unavailable"),
+
+	//SteamSockets 模块已加载但因 Steam OSS/配置原因处于禁用状态
+	SteamSocketsDisabled UMETA(DisplayName = "SteamSockets Disabled"),
+
+	//SteamSockets 已启用但命名 SocketSubsystem 尚未注册
+	SteamSocketsSocketSubsystemUnavailable UMETA(DisplayName = "SteamSockets SocketSubsystem Unavailable"),
+
+	//Shipping 没有配置 ExpectedShippingSteamAppId，插件不能使用开发 AppID 代替
+	ShippingSteamAppIdMissing UMETA(DisplayName = "Shipping Steam AppID Missing"),
+
+	//运行中 OnlineSubsystem 的 AppID 与开发或 Shipping 配置期望不一致
+	SteamAppIdMismatch UMETA(DisplayName = "Steam AppID Mismatch")
 };
 
 /**
@@ -152,6 +170,22 @@ struct FUONLINESESSION_API FFU_OnlineProviderStatus
 	//面向玩家或开发者的可读说明；正式项目可以根据StatusCode换成本地化文本
 	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
 	FString Message;
+
+	//以下 Steam 专属字段始终保留原始探测结果；LAN 不依赖它们，仍可能 Ready。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bSteamAppIdBootstrapReady = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bSteamSocketsModuleAvailable = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bSteamSocketsEnabled = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bSteamSocketsSocketSubsystemAvailable = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bSteamAppIdMatchesExpectation = false;
 };
 
 /** Blueprint-safe snapshot of a discovered online session. */

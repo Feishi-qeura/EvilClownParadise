@@ -3,6 +3,9 @@
 #include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
 #include "FU_OnlineSessionRequestValidation.h"
+#include "FU_OnlineSessionSettings.h"
+#include "FU_SteamSocketsReadiness.h"
+#include "FUOnlineSessionModule.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/NetDriver.h"
@@ -14,9 +17,10 @@
 #include "OnlineSubsystem.h"
 #include "OnlineSubsystemNames.h"
 #include "OnlineSubsystemUtils.h"
+#include "Modules/ModuleManager.h"
+#include "String/LexFromString.h"
 #include "UObject/SoftObjectPath.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogFUOnlineSession, Log, All);
 //https://dev.epicgames.com/documentation/unreal-engine/online-subsystem-steam-interface-in-unreal-engine?lang=zh-CN
 //https://partner.steamgames.com/doc/api/ISteamMatchmaking#LobbyCreated_t
 //https://partner.steamgames.com/
@@ -49,7 +53,7 @@ namespace FUOnlineSession
 
 		case EFU_OnlineProviderStatusCode::SubsystemUnavailable:
 			return FString::Printf(
-				TEXT("%s OnlineSubsystem 未加载，请检查插件启用状态和 DefaultEngine.ini"),
+				TEXT("%s OnlineSubsystem 未加载，请检查插件依赖、插件 Engine.ini 与启动日志"),
 				ProviderName);
 
 		case EFU_OnlineProviderStatusCode::SessionInterfaceUnavailable:
@@ -73,6 +77,24 @@ namespace FUOnlineSession
 			return FString::Printf(
 				TEXT("当前 World 正在使用另一种 NetDriver；请先退出联网关卡，再切换到 %s"),
 				ProviderName);
+
+		case EFU_OnlineProviderStatusCode::SteamAppIdBootstrapInvalid:
+			return TEXT("Steam 开发 AppID 运行时注入未通过验证；请重启并检查 FU Online Session 插件设置");
+
+		case EFU_OnlineProviderStatusCode::SteamSocketsModuleUnavailable:
+			return TEXT("SteamSockets 模块不可用；请确认 SteamSockets 插件已启用且 Win64 二进制可用");
+
+		case EFU_OnlineProviderStatusCode::SteamSocketsDisabled:
+			return TEXT("SteamSockets 已加载但当前禁用；请先确认 Steam OnlineSubsystem 已正常运行");
+
+		case EFU_OnlineProviderStatusCode::SteamSocketsSocketSubsystemUnavailable:
+			return TEXT("SteamSockets SocketSubsystem 尚未注册；请检查 SteamSockets 初始化日志");
+
+		case EFU_OnlineProviderStatusCode::ShippingSteamAppIdMissing:
+			return TEXT("Shipping 尚未配置 ExpectedShippingSteamAppId；插件不会回退到开发 AppID");
+
+		case EFU_OnlineProviderStatusCode::SteamAppIdMismatch:
+			return TEXT("当前 Steam AppID 与 FU Online Session 配置期望不一致；请检查打包与 Steam 环境");
 
 		default:
 			return TEXT("未知的在线提供方状态");
@@ -253,6 +275,10 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 	const UWorld* World = GetWorld();
 	Inputs.bHasWorld = World != nullptr;
 
+#if UE_BUILD_SHIPPING
+	Inputs.bShippingBuild = true;
+#endif
+
 	// Session 与 NetDriver 是两条不同依赖链；状态接口必须同时检查两者。
 	Inputs.bHasNetDriverDefinition = FU_FindGameNetDriverDefinition() != nullptr;
 	Result.bNetDriverDefinitionAvailable = Inputs.bHasNetDriverDefinition;
@@ -261,6 +287,25 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 	Inputs.bHasNetDriverClass =
 		FSoftClassPath(Result.RequiredNetDriverClass.ToString()).ResolveClass() != nullptr;
 	Result.bNetDriverClassAvailable = Inputs.bHasNetDriverClass;
+
+	if constexpr (Provider == EFU_OnlineProvider::Steam)
+	{
+		// 【模块所有权】Bootstrap ticket 只由 Runtime 模块持有；状态查询不重新注入、不触碰配置缓存。
+		const FFUOnlineSessionModule* const RuntimeModule =
+			FModuleManager::GetModulePtr<FFUOnlineSessionModule>(TEXT("FUOnlineSession"));
+		Inputs.bSteamAppIdBootstrapReady =
+			RuntimeModule != nullptr && RuntimeModule->IsSteamAppIdBootstrapReady();
+		Result.bSteamAppIdBootstrapReady = Inputs.bSteamAppIdBootstrapReady;
+
+		// 【Steam 限域】只有 Steam 模板实例化这段探针；LAN 的纯状态检查不会加载 SteamSockets。
+		const FFU_SteamSocketsReadiness SteamSockets = FFU_SteamSocketsReadinessProbe::Probe();
+		Inputs.bSteamSocketsModuleAvailable = SteamSockets.bModuleAvailable;
+		Inputs.bSteamSocketsEnabled = SteamSockets.bModuleEnabled;
+		Inputs.bSteamSocketsSocketSubsystemAvailable = SteamSockets.bSocketSubsystemAvailable;
+		Result.bSteamSocketsModuleAvailable = Inputs.bSteamSocketsModuleAvailable;
+		Result.bSteamSocketsEnabled = Inputs.bSteamSocketsEnabled;
+		Result.bSteamSocketsSocketSubsystemAvailable = Inputs.bSteamSocketsSocketSubsystemAvailable;
+	}
 
 	if (World)
 	{
@@ -302,6 +347,22 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 					IdentityInterface->GetLoginStatus(0) == ELoginStatus::LoggedIn;
 				Result.bLoggedIn = Inputs.bIsLoggedIn;
 			}
+
+			// 【AppID 比对】仅在已取得真实 Steam 子系统后读取 GetAppId；不从 TargetRules 或临时宏伪造正式环境。
+			const UFU_OnlineSessionSettings& Settings = UFU_OnlineSessionSettings::GetRuntimeSettings();
+			const int32 ExpectedAppId = Inputs.bShippingBuild
+				? Settings.ExpectedShippingSteamAppId
+				: Settings.SteamDevAppId;
+			Inputs.bShippingSteamAppIdExpected =
+				!Inputs.bShippingBuild || ExpectedAppId > 0;
+
+			int32 ActualAppId = 0;
+			const FString ActualAppIdText = OnlineSubsystem->GetAppId();
+			Inputs.bSteamAppIdMatchesExpectation =
+				ExpectedAppId > 0
+				&& LexTryParseString(ActualAppId, *ActualAppIdText)
+				&& ActualAppId == ExpectedAppId;
+			Result.bSteamAppIdMatchesExpectation = Inputs.bSteamAppIdMatchesExpectation;
 		}
 	}
 
@@ -337,6 +398,7 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(const TCHAR* Operation
 		Warning,
 		TEXT("[%s] 拒绝启动 %s：StatusCode=%d Subsystem=%s SessionInterface=%s "
 			 "IdentityInterface=%s LoggedIn=%s NetDriverDefinition=%s NetDriverClass=%s "
+			 "SteamBootstrap=%s SteamSocketsModule=%s SteamSocketsEnabled=%s SteamSocketsSubsystem=%s AppIdMatches=%s "
 			 "RequiredNetDriver=%s ActiveNetDriver=%s Message=\"%s\""),
 		FProviderTraits::GetDebugName(),
 		OperationName ? OperationName : TEXT("OnlineOperation"),
@@ -347,6 +409,11 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(const TCHAR* Operation
 		Status.bLoggedIn ? TEXT("true") : TEXT("false"),
 		Status.bNetDriverDefinitionAvailable ? TEXT("true") : TEXT("false"),
 		Status.bNetDriverClassAvailable ? TEXT("true") : TEXT("false"),
+		Status.bSteamAppIdBootstrapReady ? TEXT("true") : TEXT("false"),
+		Status.bSteamSocketsModuleAvailable ? TEXT("true") : TEXT("false"),
+		Status.bSteamSocketsEnabled ? TEXT("true") : TEXT("false"),
+		Status.bSteamSocketsSocketSubsystemAvailable ? TEXT("true") : TEXT("false"),
+		Status.bSteamAppIdMatchesExpectation ? TEXT("true") : TEXT("false"),
 		*Status.RequiredNetDriverClass.ToString(),
 		Status.ActiveNetDriverClass.IsNone() ? TEXT("None") : *Status.ActiveNetDriverClass.ToString(),
 		*Status.Message);
