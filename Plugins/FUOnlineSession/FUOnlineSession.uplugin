@@ -2,10 +2,14 @@
 	"FileVersion": 3,
 	"Version": 2,
 	"VersionName": "2.0",
+	"EngineVersion": "5.8.0",
 	"FriendlyName": "FU Online Session",
 	"Description": "支持Steam大厅及NULL LAN会话",
 	"Category": "Networking",
 	"CanContainContent": false,
+	"SupportedTargetPlatforms": [
+		"Win64"
+	],
 	"Plugins": [
 		{
 			"Name": "OnlineSubsystem",
@@ -32,12 +36,24 @@
 		{
 			"Name": "FUOnlineSession",
 			"Type": "Runtime",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "PreDefault",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"PlatformArchitectureDenyList": [
+				"Win64:arm64"
+			]
 		},
 		{
 			"Name": "FUOnlineSessionEditor",
 			"Type": "Editor",
-			"LoadingPhase": "PostEngineInit"
+			"LoadingPhase": "PostEngineInit",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"PlatformArchitectureDenyList": [
+				"Win64:arm64"
+			]
 		}
 	],
 	"CreatedBy": "feishi",

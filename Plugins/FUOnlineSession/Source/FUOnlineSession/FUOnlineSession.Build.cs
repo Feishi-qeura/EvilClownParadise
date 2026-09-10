@@ -15,16 +15,20 @@ public class FUOnlineSession : ModuleRules
             "OnlineSubsystemUtils",
             "DeveloperSettings"
         });
-        
-      
+
+        PrivateDependencyModuleNames.AddRange(new[]
+        {
+            // SteamSockets 必须在 Runtime 初始化阶段可解析，不能依赖后续动态加载才准备传输层。
+            "SteamSockets",
+            "Sockets",
+            "Slate",
+            "SlateCore"
+        });
+
         DynamicallyLoadedModuleNames.AddRange(new[]
         {
             "OnlineSubsystemSteam",
-            "OnlineSubsystemNull",
-
-            // 【FU 修复：Steam 传输依赖】
-            // Lobby 的创建/搜索属于 OnlineSubsystemSteam；steam.<SteamId> 的实际连接由 SteamSockets 解析。
-            "SteamSockets"
+            "OnlineSubsystemNull"
         });
     }
 }
