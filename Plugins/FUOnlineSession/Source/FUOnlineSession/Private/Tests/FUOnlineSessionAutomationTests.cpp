@@ -1,6 +1,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "Misc/App.h"
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineSessionRequestValidation.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
@@ -113,6 +114,63 @@ bool FFUOnlineSessionProviderNetDriverTraitsTest::RunTest(const FString& Paramet
 		TEXT("LAN Provider 必须选择 IpNetDriver"),
 		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Lan>::GetNetDriverClassName(),
 		FName(TEXT("/Script/OnlineSubsystemUtils.IpNetDriver")));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionSteamLobbyProjectIsolationTest,
+	"FUOnlineSession.ProviderTraits.SteamLobbyProjectIsolation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionSteamLobbyProjectIsolationTest::RunTest(const FString& Parameters)
+{
+	// 【FU 回归测试：Steam 公共测试 AppID 的 Lobby 隔离】
+	// SteamDevAppId=480 是许多开发者共享的 Spacewar 测试环境。如果创建房间时没有发布
+	// 项目标识、搜索时也没有把同一个标识作为后端条件，Steam 会先返回大量无关 Lobby，
+	// 本项目的房间可能在结果数量上限之外，从而出现“搜索成功但 RawResults=0”的现象。
+	FOnlineSessionSettings SteamCreateSettings;
+	TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ConfigureCreateSettings(SteamCreateSettings);
+
+	FString AdvertisedKeyword;
+	TestTrue(
+		TEXT("Steam 创建设置必须发布 Lobby 项目标识"),
+		SteamCreateSettings.Get(SEARCH_KEYWORDS, AdvertisedKeyword));
+
+	FOnlineSessionSearch SteamSearch;
+	TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ConfigureSearch(SteamSearch);
+
+	FString RequestedKeyword;
+	TestTrue(
+		TEXT("Steam 搜索必须向后端提交 Lobby 项目标识"),
+		SteamSearch.QuerySettings.Get(SEARCH_KEYWORDS, RequestedKeyword));
+	TestFalse(TEXT("Steam Lobby 项目标识不能为空"), RequestedKeyword.IsEmpty());
+	TestTrue(
+		TEXT("Steam Lobby 项目标识必须区分当前 Unreal 项目"),
+		RequestedKeyword.Contains(FApp::GetProjectName(), ESearchCase::CaseSensitive));
+	TestEqual(
+		TEXT("Steam 创建与搜索必须使用完全相同的 Lobby 项目标识"),
+		RequestedKeyword,
+		AdvertisedKeyword);
+	TestEqual(
+		TEXT("Steam Lobby 项目标识必须执行精确匹配"),
+		SteamSearch.QuerySettings.GetComparisonOp(SEARCH_KEYWORDS),
+		EOnlineComparisonOp::Equals);
+
+	// NULL/LAN 使用 UDP 广播发现，不经过 Steam Lobby 后端。
+	// 如果把 Steam 专用过滤条件误加到 LAN，会把两种 Provider 再次耦合起来。
+	FOnlineSessionSettings LanCreateSettings;
+	TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Lan>::ConfigureCreateSettings(LanCreateSettings);
+	FString UnexpectedLanKeyword;
+	TestFalse(
+		TEXT("LAN 创建设置不应发布 Steam Lobby 项目标识"),
+		LanCreateSettings.Get(SEARCH_KEYWORDS, UnexpectedLanKeyword));
+
+	FOnlineSessionSearch LanSearch;
+	TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Lan>::ConfigureSearch(LanSearch);
+	TestFalse(
+		TEXT("LAN 搜索不应携带 Steam Lobby 项目标识"),
+		LanSearch.QuerySettings.Get(SEARCH_KEYWORDS, UnexpectedLanKeyword));
 
 	return true;
 }
