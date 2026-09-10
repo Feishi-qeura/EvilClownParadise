@@ -11,6 +11,12 @@ public class EvilClownParadise : ModuleRules
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
+		
+		//显式加载Steam在线服务模块
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			DynamicallyLoadedModuleNames.Add("OnlineSubsystemSteam");
+		}
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

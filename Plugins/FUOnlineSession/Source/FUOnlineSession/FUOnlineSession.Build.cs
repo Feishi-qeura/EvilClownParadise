@@ -12,7 +12,15 @@ public class FUOnlineSession : ModuleRules
             "CoreUObject",
             "Engine",
             "OnlineSubsystem",
-            "OnlineSubsystemUtils"
+            "OnlineSubsystemUtils",
+            "DeveloperSettings"
+        });
+        
+      
+        DynamicallyLoadedModuleNames.AddRange(new[]
+        {
+            "OnlineSubsystemSteam",
+            "OnlineSubsystemNull"
         });
     }
 }

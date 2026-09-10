@@ -13,16 +13,16 @@ class FUONLINESESSION_API UFU_CheckSessionStatusAsync : public UBlueprintAsyncAc
 	GENERATED_BODY()
 
 public:
-	UPROPERTY(BlueprintAssignable, Category = "FU|Online Session")
+	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session")
 	FFU_OnCheckSessionStatusResult OnServer;
 
-	UPROPERTY(BlueprintAssignable, Category = "FU|Online Session")
+	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session")
 	FFU_OnCheckSessionStatusResult OnClient;
 
-	UPROPERTY(BlueprintAssignable, Category = "FU|Online Session")
+	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session")
 	FFU_OnCheckSessionStatusResult ClientConnectionOvertime;
 
-	UFUNCTION(BlueprintCallable, meta = (BlueprintInternalUseOnly = "true", WorldContext = "WorldContextObject"), Category = "FU|Online Session")
+	UFUNCTION(BlueprintCallable, meta = (BlueprintInternalUseOnly = "true", WorldContext = "WorldContextObject"), Category = "FUOnlineSession|Online Session")
 	static UFU_CheckSessionStatusAsync* FU_CheckSessionStatus(UObject* WorldContextObject, float RefreshTime);
 
 	virtual void Activate() override;

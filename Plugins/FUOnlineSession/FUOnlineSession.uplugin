@@ -1,26 +1,47 @@
 {
-    "FileVersion": 3,
-    "Version": 1,
-    "VersionName": "1.0",
-    "FriendlyName": "FU Online Session",
-    "Description": "Provider-agnostic OnlineSubsystem session support for FU projects.",
-    "Category": "Networking",
-    "CanContainContent": false,
-    "Plugins": [
-        {
-            "Name": "OnlineSubsystem",
-            "Enabled": true
-        },
-        {
-            "Name": "OnlineSubsystemUtils",
-            "Enabled": true
-        }
-    ],
-    "Modules": [
-        {
-            "Name": "FUOnlineSession",
-            "Type": "Runtime",
-            "LoadingPhase": "Default"
-        }
-    ]
+	"FileVersion": 3,
+	"Version": 2,
+	"VersionName": "2.0",
+	"FriendlyName": "FU Online Session",
+	"Description": "支持Steam大厅及NULL LAN会话",
+	"Category": "Networking",
+	"CanContainContent": false,
+	"Plugins": [
+		{
+			"Name": "OnlineSubsystem",
+			"Enabled": true
+		},
+		{
+			"Name": "OnlineSubsystemNull",
+			"Enabled": true
+		},
+		{
+			"Name": "OnlineSubsystemSteam",
+			"Enabled": true
+		},
+		{
+			"Name": "OnlineSubsystemUtils",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "FUOnlineSession",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "FUOnlineSessionEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	],
+	"CreatedBy": "feishi",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false
 }
