@@ -39,6 +39,10 @@
 		{
 			"Name": "DidItHit",
 			"Enabled": false
+		},
+		{
+			"Name": "FUOnlineSession",
+			"Enabled": false
 		}
 	]
 }
