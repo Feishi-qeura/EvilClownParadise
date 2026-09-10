@@ -43,6 +43,10 @@
 		{
 			"Name": "FUOnlineSession",
 			"Enabled": false
+		},
+		{
+			"Name": "SteamSockets",
+			"Enabled": true
 		}
 	]
 }
