@@ -218,6 +218,15 @@ private:
 	FFU_OnlineProviderStatus FU_CheckProviderStatus() const;
 
 	/**
+	 * 【FU 修复：异步操作的统一准入门】
+	 * 蓝图可以调用 CheckSteamProviderStatus/CheckLanProviderStatus 来控制按钮，
+	 * 但 Runtime 不能假设使用者一定会正确接线。因此创建、搜索、加入模板还会在内部
+	 * 同步检查一次状态；失败时只写诊断日志并返回 false，不会启动任何 Session 异步任务。
+	 */
+	template<EFU_OnlineProvider Provider>
+	bool FU_ValidateProviderReady(const TCHAR* OperationName) const;
+
+	/**
 	 * 【FU 修复：模板化传输选择】
 	 * Provider 在编译期决定 GameNetDriver：Steam -> SteamSockets，LAN -> IpNetDriver。
 	 * 函数必须在 OpenLevel(?listen) 或 ClientTravel 创建 NetDriver 之前调用。

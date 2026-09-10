@@ -312,6 +312,48 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 	return Result;
 }
 
+template<EFU_OnlineProvider Provider>
+bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(const TCHAR* OperationName) const
+{
+	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
+
+	static_assert(
+		Provider == EFU_OnlineProvider::Steam || Provider == EFU_OnlineProvider::Lan,
+		"不受支持的 FU 在线提供商");
+
+	// 【FU 修复：不能只依赖蓝图状态节点】
+	// 状态检查本身是同步、只读的：它不会登录 Steam、不会修改 ProviderState，
+	// 也不会注册异步委托。因此可以安全地放在每一个公开模板操作的入口处。
+	const FFU_OnlineProviderStatus Status = FU_CheckProviderStatus<Provider>();
+	if (Status.bIsReady)
+	{
+		return true;
+	}
+
+	// 一条日志同时记录状态码和各依赖层，便于区分“Steam 未登录”、
+	// “OnlineSubsystem 缺失”以及“NetDriver 配置错误”，无需再从大量 OSS 日志中猜测。
+	UE_LOG(
+		LogFUOnlineSession,
+		Warning,
+		TEXT("[%s] 拒绝启动 %s：StatusCode=%d Subsystem=%s SessionInterface=%s "
+			 "IdentityInterface=%s LoggedIn=%s NetDriverDefinition=%s NetDriverClass=%s "
+			 "RequiredNetDriver=%s ActiveNetDriver=%s Message=\"%s\""),
+		FProviderTraits::GetDebugName(),
+		OperationName ? OperationName : TEXT("OnlineOperation"),
+		static_cast<int32>(Status.StatusCode),
+		Status.bSubsystemAvailable ? TEXT("true") : TEXT("false"),
+		Status.bSessionInterfaceAvailable ? TEXT("true") : TEXT("false"),
+		Status.bIdentityInterfaceAvailable ? TEXT("true") : TEXT("false"),
+		Status.bLoggedIn ? TEXT("true") : TEXT("false"),
+		Status.bNetDriverDefinitionAvailable ? TEXT("true") : TEXT("false"),
+		Status.bNetDriverClassAvailable ? TEXT("true") : TEXT("false"),
+		*Status.RequiredNetDriverClass.ToString(),
+		Status.ActiveNetDriverClass.IsNone() ? TEXT("None") : *Status.ActiveNetDriverClass.ToString(),
+		*Status.Message);
+
+	return false;
+}
+
 //清理创建委托
 template<EFU_OnlineProvider Provider>
 void UFU_OnlineSessionSubsystem::FU_ClearCreateDelegate()
@@ -643,6 +685,14 @@ void UFU_OnlineSessionSubsystem::FU_CreateSession(const int32 MaxPlayers, const 
 		return;
 	}
 
+	// 【FU 修复：Runtime 自我保护】蓝图即使没有先检查状态，
+	// Steam 未登录、子系统缺失或驱动不可用时也不会进入 CreateSession 异步流程。
+	if (!FU_ValidateProviderReady<Provider>(TEXT("CreateSession")))
+	{
+		OnCreateSessionCompleteV2.Broadcast(Provider, false);
+		return;
+	}
+
 	State.SessionInterface = FU_GetSessionInterface<Provider>();
 
 	if (!State.SessionInterface.IsValid())
@@ -769,6 +819,15 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
         OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
         return;
     }
+
+	// 【FU 修复：搜索前检查 Steam Identity】日志中的 FindSessions Started=true
+	// 只表示调用被接口接收，不代表 Steam 用户已经具备在线搜索资格。
+	// 在这里提前拒绝 NotLoggedIn，可避免随后只得到含义模糊的异步 false 和空 Results。
+	if (!FU_ValidateProviderReady<Provider>(TEXT("FindSessions")))
+	{
+		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
+		return;
+	}
 
     APlayerController* PlayerController = FU_GetLocalPlayerController();
 
@@ -941,6 +1000,14 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
         OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::UnknownError);
         return;
     }
+
+	// 【FU 修复：加入前重新验证环境】搜索完成到点击加入之间，Steam 可能掉线，
+	// NetDriver 也可能因地图状态改变而产生冲突；使用同一模板检查可以保留 Provider 类型信息。
+	if (!FU_ValidateProviderReady<Provider>(TEXT("JoinSession")))
+	{
+		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::UnknownError);
+		return;
+	}
 
     State.SessionInterface = FU_GetSessionInterface<Provider>();
 

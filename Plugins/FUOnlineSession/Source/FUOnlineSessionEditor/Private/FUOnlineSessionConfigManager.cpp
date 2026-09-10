@@ -127,9 +127,17 @@ FString FFUOnlineSessionConfigManager::BuildManagedConfigBlock(
         Settings.SteamDevAppId
     ));
 
-    // 【FU 修复：双 Provider 固定职责】Steam Lobby 必须保留 Steam 网络传输；
-    // LAN 入口会在 Runtime 模板中切换到 IpNetDriver，不需要关闭全局 Steam 能力。
-    AddLine(TEXT("bUseSteamNetworking=true"));
+    // 【FU 修复：双 Provider 的 SocketSubsystem 隔离】
+    // 这个开关控制的是“SteamSockets 是否成为所有 NetDriver 的全局默认 SocketSubsystem”，
+    // 并不是“是否允许 Steam Lobby”。如果设为 true，模板即使把驱动类切换成 IpNetDriver，
+    // IpNetDriver 仍可能从全局默认项取得 SteamSockets；但局域网发现依赖 UDP 广播，
+    // SteamSockets 不支持 IpNetDriver 在这里设置的 SO_BROADCAST，于是 Listen 会直接失败。
+    //
+    // 设为 false 后职责才真正分离：
+    //   Steam 模板 -> 显式 SteamSocketsNetDriver -> SteamSockets；
+    //   LAN 模板   -> IpNetDriver                  -> 平台原生 UDP Socket。
+    // SteamSockets 插件、Steam OnlineSubsystem 和 Lobby 功能仍然保持启用。
+    AddLine(TEXT("bUseSteamNetworking=false"));
 
     AddLine(TEXT(""));
 
