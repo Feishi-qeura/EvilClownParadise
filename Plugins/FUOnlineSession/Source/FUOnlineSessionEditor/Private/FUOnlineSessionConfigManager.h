@@ -4,71 +4,27 @@
 
 class UFU_OnlineSessionSettings;
 
-/**
- * 自动配置操作的结果。
- * Editor 模块根据结果决定是否提示用户重启。
- */
+/** 一次性遗留配置迁移的对外兼容结果。 */
 enum class EFU_OnlineConfigResult : uint8
 {
-    // 配置已经正确，不需要写文件。
+    // 项目中不存在历史 FU 受管区块。
     Unchanged,
 
-    // DefaultEngine.ini 已经更新，需要重启编辑器。
+    // 历史区块已从 DefaultEngine.ini 原子迁移，需要重启编辑器重新读取配置层。
     Updated,
 
-    // 用户关闭了自动配置。
-    Disabled,
-
-    // 管理区块之外存在插件无法安全接管的自定义 GameNetDriver。
-    Conflict,
-
-    // 配置文件读取、标记检查或者保存失败。
+    // 标记损坏、读取失败或无法安全发布；详情由 Editor 日志给出。
     Failed
-};
-
-/** 自动管理区块之外的 GameNetDriver 分析结果。 */
-enum class EFU_ExternalGameNetDriverState : uint8
-{
-    // 没有找到外部 GameNetDriver 定义。
-    None,
-
-    // 找到 SteamNetDriver 或 IpNetDriver 的旧定义；语义兼容，可以继续配置。
-    Compatible,
-
-    // 找到项目自定义驱动；插件无法证明覆盖它是安全的。
-    Conflict
 };
 
 /**
  * 只在 Editor 模块使用的工程配置管理器。
  *
  * 它不保存 Session 运行时状态，
- * 只负责把插件设置转换成 DefaultEngine.ini 配置。
+ * 只负责运行一次历史 DefaultEngine.ini 迁移，绝不生成当前配置。
  */
 class FFUOnlineSessionConfigManager final
 {
 public:
     static EFU_OnlineConfigResult EnsureProjectConfiguration();
-
-    /**
-     * 分析不属于插件管理区块的 GameNetDriver。
-     * 函数不读写磁盘，放在 Editor 私有模块中公开是为了让自动化测试直接验证规则。
-     */
-    static EFU_ExternalGameNetDriverState AnalyzeExternalGameNetDriver(
-        const FString& ExternalConfigContent
-    );
-
-    /**
-     * 【FU 修复：可测试的配置生成】
-     * 将设置转换成完整的受管 ini 区块；函数本身不读写磁盘。
-     * 公开这个纯转换接口，可以让自动化测试直接阻止旧 SteamNetDriver 路径回归。
-     */
-    static FString BuildManagedConfigBlock(
-        const UFU_OnlineSessionSettings& Settings
-    );
-
-private:
-    static EFU_OnlineConfigResult WriteManagedConfigBlock(
-        const FString& ManagedBlock
-    );
 };

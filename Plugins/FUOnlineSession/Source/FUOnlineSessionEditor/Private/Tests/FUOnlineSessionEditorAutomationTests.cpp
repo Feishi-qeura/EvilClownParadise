@@ -7,88 +7,9 @@
 #include "PluginDescriptor.h"
 #include "UObject/UnrealType.h"
 #include "FUOnlineSessionConfigManager.h"
+#include "FUOnlineSessionLegacyConfigMigration.h"
 #include "FU_OnlineSessionSettings.h"
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FFUOnlineSessionExternalDriverAnalysisTest,
-	"FUOnlineSession.EditorConfig.ExternalDriverAnalysis",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FFUOnlineSessionExternalDriverAnalysisTest::RunTest(const FString& Parameters)
-{
-	const FString NoExternalDriver = TEXT(
-		"[OnlineSubsystem]\n"
-		"DefaultPlatformService=Steam\n");
-
-	TestEqual(
-		TEXT("没有外部 GameNetDriver 时可以安全写入"),
-		FFUOnlineSessionConfigManager::AnalyzeExternalGameNetDriver(NoExternalDriver),
-		EFU_ExternalGameNetDriverState::None);
-
-	const FString CompatibleLegacySteamDriver = TEXT(
-		"[/Script/Engine.GameEngine]\n"
-		"+NetDriverDefinitions=(DefName=\"GameNetDriver\",DriverClassName=\"OnlineSubsystemSteam.SteamNetDriver\",DriverClassNameFallback=\"OnlineSubsystemUtils.IpNetDriver\")\n");
-
-	TestEqual(
-		TEXT("旧写法但语义相同的 Steam 驱动只视为兼容重复项"),
-		FFUOnlineSessionConfigManager::AnalyzeExternalGameNetDriver(CompatibleLegacySteamDriver),
-		EFU_ExternalGameNetDriverState::Compatible);
-
-	const FString ConflictingCustomDriver = TEXT(
-		"[/Script/Engine.GameEngine]\n"
-		"+NetDriverDefinitions=(DefName=\"GameNetDriver\",DriverClassName=\"/Script/MyNetwork.MyNetDriver\",DriverClassNameFallback=\"/Script/OnlineSubsystemUtils.IpNetDriver\")\n");
-
-	TestEqual(
-		TEXT("自定义 GameNetDriver 不允许被插件静默覆盖"),
-		FFUOnlineSessionConfigManager::AnalyzeExternalGameNetDriver(ConflictingCustomDriver),
-		EFU_ExternalGameNetDriverState::Conflict);
-
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FFUOnlineSessionManagedConfigBlockTest,
-	"FUOnlineSession.EditorConfig.ManagedBlockUsesSteamSockets",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FFUOnlineSessionManagedConfigBlockTest::RunTest(const FString& Parameters)
-{
-	UFU_OnlineSessionSettings* Settings = NewObject<UFU_OnlineSessionSettings>();
-	Settings->SteamDevAppId = 480;
-
-	const FString ManagedBlock =
-		FFUOnlineSessionConfigManager::BuildManagedConfigBlock(*Settings);
-
-	// 自动配置必须生成 UE 5.8 SteamSockets 模块中的真实驱动类。
-	TestTrue(
-		TEXT("管理区块包含 SteamSocketsNetDriver"),
-		ManagedBlock.Contains(TEXT("/Script/SteamSockets.SteamSocketsNetDriver")));
-
-	TestTrue(
-		TEXT("管理区块包含 SteamSocketsNetConnection"),
-		ManagedBlock.Contains(TEXT("/Script/SteamSockets.SteamSocketsNetConnection")));
-
-	// 【FU 回归测试：双 Provider 的 SocketSubsystem 隔离】
-	// bUseSteamNetworking 控制 SteamSockets 是否成为“全局默认”SocketSubsystem。
-	// 如果这里为 true，运行时即使把 NetDriver 类切换成 IpNetDriver，IpNetDriver 仍可能
-	// 拿到 SteamSockets，并在创建 LAN 广播 Socket 时因 SO_BROADCAST 不受支持而监听失败。
-	// 因此全局默认必须保留为平台原生 Socket；Steam 模板仍会通过显式
-	// SteamSocketsNetDriver 使用 SteamSockets，这不会关闭 Steam Lobby 联机。
-	TestTrue(
-		TEXT("管理区块禁止 SteamSockets 接管全局默认 SocketSubsystem"),
-		ManagedBlock.Contains(TEXT("bUseSteamNetworking=false")));
-
-	TestFalse(
-		TEXT("管理区块不能重新生成会破坏 LAN 广播的旧配置"),
-		ManagedBlock.Contains(TEXT("bUseSteamNetworking=true")));
-
-	// 旧路径会加载失败并静默回退到 IpNetDriver，这个回归必须被测试阻止。
-	TestFalse(
-		TEXT("管理区块不再生成旧 OnlineSubsystemSteam NetDriver 路径"),
-		ManagedBlock.Contains(TEXT("/Script/OnlineSubsystemSteam.SteamNetDriver")));
-
-	return true;
-}
+#include "Misc/SecureHash.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FFUOnlineSessionProviderOperationPreflightWiringTest,
@@ -223,9 +144,9 @@ bool FFUOnlineSessionDescriptorConfigContractTest::RunTest(const FString& Parame
 
 	FString EditorModuleSource;
 	TestTrue(TEXT("能够读取 FU Online Session Editor 模块实现"), FFileHelper::LoadFileToString(EditorModuleSource, *EditorModuleSourcePath));
-	// 【安全契约】正常启动和设置变更不能再触发旧写入器，避免插件静默修改项目 DefaultEngine.ini。
-	TestFalse(
-		TEXT("Editor 生命周期不再调用旧项目配置写入器"),
+	// 【迁移契约】启动仅调用一次迁移入口；设置变更路径不得重新触发，避免持续管理项目配置。
+	TestTrue(
+		TEXT("Editor 启动调用一次历史配置迁移"),
 		EditorModuleSource.Contains(TEXT("FFUOnlineSessionConfigManager::EnsureProjectConfiguration")));
 
 	const UFU_OnlineSessionSettings* Settings = GetDefault<UFU_OnlineSessionSettings>();
@@ -251,6 +172,90 @@ bool FFUOnlineSessionDescriptorConfigContractTest::RunTest(const FString& Parame
 
 	TestNumericDefault(TEXT("ExpectedShippingSteamAppId"), 0.0);
 	TestNumericDefault(TEXT("OperationTimeoutSeconds"), 30.0);
+
+	return true;
+}
+
+namespace FUOnlineSessionLegacyMigrationTests
+{
+	/**
+	 * 【迁移测试辅助】从固定字节构造哈希，避免测试把二进制 ini 重新编码为字符串。
+	 * 这里的哈希仅用于验证发布结果分类；输入为空时仍保留 SHA 的确定性结果。
+	 */
+	FSHAHash HashBytes(const TArray<uint8>& Bytes)
+	{
+		FSHAHash Hash;
+		FSHA1::HashBuffer(Bytes.GetData(), Bytes.Num(), Hash.Hash);
+		return Hash;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionLegacyConfigMigrationTest,
+	"FUOnlineSession.EditorConfig.LegacyMigration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionLegacyConfigMigrationTest::RunTest(const FString& Parameters)
+{
+	using namespace FUOnlineSessionLegacyMigrationTests;
+
+	const TArray<uint8> ValidFixture = {
+		0xEF, 0xBB, 0xBF,
+		'P', 'r', 'e', 'f', 'i', 'x', '\r', '\n',
+		';', ' ', 'B', 'E', 'G', 'I', 'N', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n',
+		0x80, 'M', 'i', 'd', '\r', '\n',
+		';', ' ', 'E', 'N', 'D', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\r', '\n',
+		'S', 'u', 'f', 'f', 'i', 'x', 0x00, '\n'
+	};
+	const TArray<uint8> ExpectedValidBytes = {
+		0xEF, 0xBB, 0xBF,
+		'P', 'r', 'e', 'f', 'i', 'x', '\r', '\n',
+		'S', 'u', 'f', 'f', 'i', 'x', 0x00, '\n'
+	};
+
+	// 【字节保真契约】BOM、混合换行和非文本字节都必须原样保留，只删除完整受管行范围。
+	const FFU_LegacyTransformResult ValidTransform = FFU_LegacyConfigMigration::Transform(ValidFixture);
+	TestEqual(TEXT("完整标记对可以发布"), ValidTransform.Result, EFU_LegacyMigrationResult::Published);
+	TestTrue(TEXT("完整标记对只删除受管字节"), ValidTransform.TransformedBytes == ExpectedValidBytes);
+
+	const TArray<uint8> NoMarkerFixture = { 0xEF, 0xBB, 0xBF, 'A', '\r', '\n', 0x80, 'B', '\n' };
+	const FFU_LegacyTransformResult NoMarkerTransform = FFU_LegacyConfigMigration::Transform(NoMarkerFixture);
+	TestEqual(TEXT("没有标记不触发发布"), NoMarkerTransform.Result, EFU_LegacyMigrationResult::NoManagedBlock);
+	TestTrue(TEXT("没有标记保持输入字节"), NoMarkerTransform.TransformedBytes == NoMarkerFixture);
+
+	const TArray<TArray<uint8>> InvalidFixtures = {
+		{ ';', ' ', 'B', 'E', 'G', 'I', 'N', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n' },
+		{ ';', ' ', 'E', 'N', 'D', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n' },
+		{ ';', ' ', 'E', 'N', 'D', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n', ';', ' ', 'B', 'E', 'G', 'I', 'N', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n' },
+		{ ';', ' ', 'B', 'E', 'G', 'I', 'N', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n', ';', ' ', 'E', 'N', 'D', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n', ';', ' ', 'B', 'E', 'G', 'I', 'N', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n', ';', ' ', 'E', 'N', 'D', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n' },
+		{ 'x', ';', ' ', 'B', 'E', 'G', 'I', 'N', ' ', 'F', 'U', 'O', 'N', 'L', 'I', 'N', 'E', 'S', 'E', 'S', 'S', 'I', 'O', 'N', ' ', 'A', 'U', 'T', 'O', ' ', 'C', 'O', 'N', 'F', 'I', 'G', '\n' }
+	};
+	for (const TArray<uint8>& InvalidFixture : InvalidFixtures)
+	{
+		const FFU_LegacyTransformResult InvalidTransform = FFU_LegacyConfigMigration::Transform(InvalidFixture);
+		TestEqual(TEXT("损坏或非完整行标记必须失败"), InvalidTransform.Result, EFU_LegacyMigrationResult::InvalidMarkers);
+		TestTrue(TEXT("损坏标记不能产生可发布字节"), InvalidTransform.TransformedBytes.IsEmpty());
+	}
+
+	const FSHAHash OriginalHash = HashBytes(ValidFixture);
+	const FSHAHash TransformedHash = HashBytes(ExpectedValidBytes);
+	TestEqual(
+		TEXT("替换失败且目标仍是原始文件必须失败"),
+		FFU_LegacyConfigMigration::ClassifyReplaceOutcome(OriginalHash, TransformedHash, OriginalHash),
+		EFU_LegacyMigrationResult::Failed);
+	TestEqual(
+		TEXT("替换 API 失败但目标已更新必须带警告发布"),
+		FFU_LegacyConfigMigration::ClassifyReplaceOutcome(OriginalHash, TransformedHash, TransformedHash),
+		EFU_LegacyMigrationResult::PublishedWithWarning);
+	TestEqual(
+		TEXT("目标缺失必须要求人工恢复"),
+		FFU_LegacyConfigMigration::ClassifyReplaceOutcome(OriginalHash, TransformedHash, TOptional<FSHAHash>()),
+		EFU_LegacyMigrationResult::ManualRecoveryRequired);
+	const TArray<uint8> ThirdBytes = { 'T', 'h', 'i', 'r', 'd' };
+	TestEqual(
+		TEXT("目标哈希未知必须要求人工恢复"),
+		FFU_LegacyConfigMigration::ClassifyReplaceOutcome(OriginalHash, TransformedHash, HashBytes(ThirdBytes)),
+		EFU_LegacyMigrationResult::ManualRecoveryRequired);
 
 	return true;
 }

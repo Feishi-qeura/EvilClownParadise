@@ -1,348 +1,41 @@
 #include "FUOnlineSessionConfigManager.h"
 
-#include "FU_OnlineSessionSettings.h"
-#include "HAL/FileManager.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
+#include "FUOnlineSessionLegacyConfigMigration.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFUOnlineSessionConfig, Log, All);
 
-namespace FUOnlineSessionConfig
+EFU_OnlineConfigResult FFUOnlineSessionConfigManager::EnsureProjectConfiguration()
 {
-    constexpr const TCHAR* BeginMarker =
-        TEXT("; BEGIN FUONLINESESSION AUTO CONFIG");
+	// 【兼容入口】保留旧私有入口给既有 Editor 调用者；新语义只执行一次遗留块清理，不读取 Settings 生成新配置。
+	FFU_LegacyMigrationArtifacts Artifacts;
+	const EFU_LegacyMigrationResult MigrationResult =
+		FFU_LegacyConfigMigration::MigrateProjectDefaultEngine(Artifacts);
 
-    constexpr const TCHAR* EndMarker =
-        TEXT("; END FUONLINESESSION AUTO CONFIG");
-}
+	switch (MigrationResult)
+	{
+	case EFU_LegacyMigrationResult::NoManagedBlock:
+		UE_LOG(LogFUOnlineSessionConfig, Log, TEXT("未发现 FU Online Session 历史 DefaultEngine.ini 受管区块"));
+		return EFU_OnlineConfigResult::Unchanged;
 
-EFU_ExternalGameNetDriverState
-FFUOnlineSessionConfigManager::AnalyzeExternalGameNetDriver(
-    const FString& ExternalConfigContent
-)
-{
-    // 【FU 修复：旧配置迁移】参数仍保留以兼容已有调用接口。
-    // 无论当前默认选择 Steam 还是 IP，下列驱动都属于插件认识且能够迁移的历史配置。
-    // 其中 OnlineSubsystemSteam.SteamNetDriver 是旧文档路径，只允许识别和迁移，绝不再生成。
-    static const TCHAR* SupportedDriverNames[] =
-    {
-        TEXT("SteamSockets.SteamSocketsNetDriver"),
-        TEXT("SocketSubsystemSteamIP.SteamNetDriver"),
-        TEXT("OnlineSubsystemSteam.SteamNetDriver"),
-        TEXT("OnlineSubsystemUtils.IpNetDriver")
-    };
+	case EFU_LegacyMigrationResult::Published:
+		UE_LOG(LogFUOnlineSessionConfig, Log, TEXT("已安全迁移 FU Online Session 历史配置；审计备份：%s"), *Artifacts.SavedBackupPath);
+		return EFU_OnlineConfigResult::Updated;
 
-    TArray<FString> Lines;
-    ExternalConfigContent.ParseIntoArrayLines(Lines, false);
+	case EFU_LegacyMigrationResult::PublishedWithWarning:
+		// 【结果可证】ReplaceFileW 返回异常但目标哈希已确认发布，提醒用户重启并保留 Saved 备份供审计。
+		UE_LOG(LogFUOnlineSessionConfig, Warning, TEXT("历史配置已发布但 ReplaceFileW 返回警告：%s；备份：%s"), *Artifacts.Error, *Artifacts.SavedBackupPath);
+		return EFU_OnlineConfigResult::Updated;
 
-    bool bFoundCompatibleDefinition = false;
+	case EFU_LegacyMigrationResult::ManualRecoveryRequired:
+		// 【人工恢复】未知目标状态时列出全部保留材料，绝不由插件猜测覆盖方向。
+		UE_LOG(LogFUOnlineSessionConfig, Error, TEXT("历史配置迁移需要人工恢复：%s；Saved=%s；Rollback=%s；Temp=%s"), *Artifacts.Error, *Artifacts.SavedBackupPath, *Artifacts.RollbackBackupPath, *Artifacts.TemporaryPath);
+		return EFU_OnlineConfigResult::Failed;
 
-    for (FString Line : Lines)
-    {
-        Line.TrimStartAndEndInline();
-
-        // 注释中的示例不是有效配置，不能误判为冲突。
-        if (Line.IsEmpty() || Line.StartsWith(TEXT(";")) || Line.StartsWith(TEXT("#")))
-        {
-            continue;
-        }
-
-        const bool bDefinesGameNetDriver =
-            Line.Contains(TEXT("NetDriverDefinitions"), ESearchCase::IgnoreCase)
-            && Line.Contains(TEXT("GameNetDriver"), ESearchCase::IgnoreCase);
-
-        if (!bDefinesGameNetDriver)
-        {
-            continue;
-        }
-
-        // 只检查主 DriverClassName，不能搜索整行：
-        // 自定义主驱动通常也会把 IpNetDriver 写成 Fallback，搜索整行会把这种冲突误判为兼容。
-        const int32 DriverClassIndex = Line.Find(
-            TEXT("DriverClassName="),
-            ESearchCase::IgnoreCase
-        );
-
-        FString PrimaryDriverDefinition =
-            DriverClassIndex == INDEX_NONE
-                ? FString()
-                : Line.Mid(DriverClassIndex);
-
-        int32 PrimaryDriverEndIndex = INDEX_NONE;
-        if (PrimaryDriverDefinition.FindChar(TEXT(','), PrimaryDriverEndIndex))
-        {
-            PrimaryDriverDefinition.LeftInline(PrimaryDriverEndIndex);
-        }
-
-        // 同时兼容带 /Script/ 的现代写法以及 UE 旧项目常见的不带前缀写法。
-        bool bUsesSupportedDriver = false;
-        for (const TCHAR* SupportedDriverName : SupportedDriverNames)
-        {
-            if (PrimaryDriverDefinition.Contains(SupportedDriverName, ESearchCase::IgnoreCase))
-            {
-                bUsesSupportedDriver = true;
-                break;
-            }
-        }
-
-        if (!bUsesSupportedDriver)
-        {
-            // 任何自定义 GameNetDriver 都优先判为冲突，防止被 !NetDriverDefinitions 清除。
-            return EFU_ExternalGameNetDriverState::Conflict;
-        }
-
-        bFoundCompatibleDefinition = true;
-    }
-
-    return bFoundCompatibleDefinition
-        ? EFU_ExternalGameNetDriverState::Compatible
-        : EFU_ExternalGameNetDriverState::None;
-}
-
-FString FFUOnlineSessionConfigManager::BuildManagedConfigBlock(
-    const UFU_OnlineSessionSettings& Settings
-)
-{
-    FString Result;
-
-    // 所有行统一使用平台换行符，避免每次启动都因为换行格式不同而重写文件。
-    const auto AddLine = [&Result](const FString& Line)
-    {
-        Result += Line;
-        Result += LINE_TERMINATOR;
-    };
-
-    AddLine(FUOnlineSessionConfig::BeginMarker);
-    AddLine(TEXT(""));
-
-    AddLine(TEXT("[OnlineSubsystem]"));
-    AddLine(TEXT("DefaultPlatformService=Steam"));
-    AddLine(TEXT(""));
-
-    AddLine(TEXT("[OnlineSubsystemSteam]"));
-    AddLine(TEXT("bEnabled=true"));
-
-    AddLine(FString::Printf(
-        TEXT("SteamDevAppId=%d"),
-        Settings.SteamDevAppId
-    ));
-
-    // 【FU 修复：双 Provider 的 SocketSubsystem 隔离】
-    // 这个开关控制的是“SteamSockets 是否成为所有 NetDriver 的全局默认 SocketSubsystem”，
-    // 并不是“是否允许 Steam Lobby”。如果设为 true，模板即使把驱动类切换成 IpNetDriver，
-    // IpNetDriver 仍可能从全局默认项取得 SteamSockets；但局域网发现依赖 UDP 广播，
-    // SteamSockets 不支持 IpNetDriver 在这里设置的 SO_BROADCAST，于是 Listen 会直接失败。
-    //
-    // 设为 false 后职责才真正分离：
-    //   Steam 模板 -> 显式 SteamSocketsNetDriver -> SteamSockets；
-    //   LAN 模板   -> IpNetDriver                  -> 平台原生 UDP Socket。
-    // SteamSockets 插件、Steam OnlineSubsystem 和 Lobby 功能仍然保持启用。
-    AddLine(TEXT("bUseSteamNetworking=false"));
-
-    AddLine(TEXT(""));
-
-    AddLine(TEXT("[/Script/Engine.GameEngine]"));
-
-    // 插件需要控制 GameNetDriver，同时重新补回 DemoNetDriver，
-    // 避免 ClearArray 破坏引擎的录像驱动配置。
-    AddLine(TEXT("!NetDriverDefinitions=ClearArray"));
-
-    // 【FU 修复：SteamSockets】UE 5.8 的现代 Steam P2P 传输使用独立 SteamSocketsNetDriver。
-    // 旧 /Script/OnlineSubsystemSteam.SteamNetDriver 在本引擎版本中无法加载，
-    // 加载失败后会回退到 IpNetDriver，进而把 steam.<SteamId> 错当成 DNS 主机名。
-    AddLine(
-        TEXT(
-            "+NetDriverDefinitions="
-            "(DefName=\"GameNetDriver\","
-            "DriverClassName=\"/Script/SteamSockets.SteamSocketsNetDriver\","
-            "DriverClassNameFallback=\"/Script/OnlineSubsystemUtils.IpNetDriver\")"
-        )
-    );
-
-    AddLine(
-        TEXT(
-            "+NetDriverDefinitions="
-            "(DefName=\"DemoNetDriver\","
-            "DriverClassName=\"/Script/Engine.DemoNetDriver\","
-            "DriverClassNameFallback=\"/Script/Engine.DemoNetDriver\")"
-        )
-    );
-
-    AddLine(TEXT(""));
-    AddLine(
-        TEXT(
-            "[/Script/SteamSockets.SteamSocketsNetDriver]"
-        )
-    );
-
-    AddLine(
-        TEXT(
-            "NetConnectionClassName="
-            "\"/Script/SteamSockets.SteamSocketsNetConnection\""
-        )
-    );
-
-    AddLine(TEXT(""));
-    AddLine(FUOnlineSessionConfig::EndMarker);
-
-    return Result;
-}
-
-EFU_OnlineConfigResult
-FFUOnlineSessionConfigManager::WriteManagedConfigBlock(
-    const FString& ManagedBlock
-)
-{
-    const FString ConfigPath = FPaths::ConvertRelativePathToFull(
-        FPaths::Combine(
-            FPaths::ProjectConfigDir(),
-            TEXT("DefaultEngine.ini")
-        )
-    );
-
-    FString ExistingContent;
-
-    const bool bConfigExists =
-        IFileManager::Get().FileExists(*ConfigPath);
-
-    if (bConfigExists)
-    {
-        // 文件存在却读取失败时不能继续写入，
-        // 否则可能覆盖用户原本的完整配置。
-        if (!FFileHelper::LoadFileToString(
-            ExistingContent,
-            *ConfigPath
-        ))
-        {
-            return EFU_OnlineConfigResult::Failed;
-        }
-    }
-
-    const FString OriginalContent = ExistingContent;
-
-    const int32 BeginIndex = ExistingContent.Find(
-        FUOnlineSessionConfig::BeginMarker,
-        ESearchCase::CaseSensitive
-    );
-
-    const int32 EndIndex = ExistingContent.Find(
-        FUOnlineSessionConfig::EndMarker,
-        ESearchCase::CaseSensitive
-    );
-
-    const bool bHasBeginMarker = BeginIndex != INDEX_NONE;
-    const bool bHasEndMarker = EndIndex != INDEX_NONE;
-
-    // 只出现一个标记表示文件可能被人工编辑坏了。
-    // 此时宁可停止，也不能猜测应该删除哪一段。
-    if (bHasBeginMarker != bHasEndMarker)
-    {
-        return EFU_OnlineConfigResult::Failed;
-    }
-
-    if (bHasBeginMarker && bHasEndMarker)
-    {
-        // End 标记必须位于 Begin 标记之后。
-        if (EndIndex < BeginIndex)
-        {
-            return EFU_OnlineConfigResult::Failed;
-        }
-
-        const int32 BlockEndIndex =
-            EndIndex
-            + FCString::Strlen(
-                FUOnlineSessionConfig::EndMarker
-            );
-
-        ExistingContent.RemoveAt(
-            BeginIndex,
-            BlockEndIndex - BeginIndex
-        );
-    }
-
-    // 移除插件自己的区块后，剩余 GameNetDriver 才是项目或其他插件拥有的配置。
-    const EFU_ExternalGameNetDriverState ExternalDriverState =
-        AnalyzeExternalGameNetDriver(
-            ExistingContent
-        );
-
-    if (ExternalDriverState == EFU_ExternalGameNetDriverState::Conflict)
-    {
-        // 用户自定义驱动的用途未知；停止写入比静默破坏其他联网插件更安全。
-        UE_LOG(
-            LogFUOnlineSessionConfig,
-            Error,
-            TEXT("检测到 FU 管理区块之外的自定义 GameNetDriver，已停止自动配置")
-        );
-        return EFU_OnlineConfigResult::Conflict;
-    }
-
-    if (ExternalDriverState == EFU_ExternalGameNetDriverState::Compatible)
-    {
-        // 兼容旧定义不会被删除；管理区块会先 ClearArray，再建立当前选择的驱动。
-        UE_LOG(
-            LogFUOnlineSessionConfig,
-            Warning,
-            TEXT("检测到兼容的旧 GameNetDriver 定义；FU 管理区块将在运行时覆盖它")
-        );
-    }
-
-    ExistingContent.TrimEndInline();
-
-    if (!ExistingContent.IsEmpty())
-    {
-        ExistingContent += LINE_TERMINATOR;
-        ExistingContent += LINE_TERMINATOR;
-    }
-
-    ExistingContent += ManagedBlock;
-
-    // 内容完全相同就不写磁盘。
-    if (ExistingContent == OriginalContent)
-    {
-        return EFU_OnlineConfigResult::Unchanged;
-    }
-
-    IFileManager::Get().MakeDirectory(
-        *FPaths::GetPath(ConfigPath),
-        true
-    );
-
-    const bool bSaved = FFileHelper::SaveStringToFile(
-        ExistingContent,
-        *ConfigPath,
-        FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM
-    );
-
-    return bSaved
-        ? EFU_OnlineConfigResult::Updated
-        : EFU_OnlineConfigResult::Failed;
-}
-
-EFU_OnlineConfigResult
-FFUOnlineSessionConfigManager::EnsureProjectConfiguration()
-{
-    const UFU_OnlineSessionSettings* Settings =
-        GetDefault<UFU_OnlineSessionSettings>();
-
-    if (!Settings)
-    {
-        return EFU_OnlineConfigResult::Failed;
-    }
-
-    if (!Settings->bAutoConfigureProject)
-    {
-        // 关闭自动配置只会停止继续更新，
-        // 不会擅自删除以前已经生成的配置。
-        return EFU_OnlineConfigResult::Disabled;
-    }
-
-    if (Settings->SteamDevAppId <= 0)
-    {
-        return EFU_OnlineConfigResult::Failed;
-    }
-
-    return WriteManagedConfigBlock(
-        BuildManagedConfigBlock(*Settings)
-    );
+	case EFU_LegacyMigrationResult::InvalidMarkers:
+	case EFU_LegacyMigrationResult::Failed:
+	default:
+		// 【失败封闭】标记或 IO 不可信时不生成任何项目配置，要求用户从日志和备份继续处理。
+		UE_LOG(LogFUOnlineSessionConfig, Error, TEXT("历史 DefaultEngine.ini 迁移失败：%s"), *Artifacts.Error);
+		return EFU_OnlineConfigResult::Failed;
+	}
 }

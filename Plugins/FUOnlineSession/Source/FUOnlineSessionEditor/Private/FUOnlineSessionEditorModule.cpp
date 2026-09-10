@@ -1,5 +1,6 @@
 #include "FUOnlineSessionEditorModule.h"
 
+#include "FUOnlineSessionConfigManager.h"
 #include "FU_OnlineSessionSettings.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Misc/Paths.h"
@@ -17,9 +18,16 @@ void FFUOnlineSessionEditorModule::StartupModule()
 		return;
 	}
 
-	// 先注册设置回调；普通启动只读取插件配置，绝不写入项目 DefaultEngine.ini。
+	// 【一次性迁移】启动期只调用历史块清理一次；成功后标记消失，后续启动不会再写项目配置。
+	const EFU_OnlineConfigResult MigrationResult =
+		FFUOnlineSessionConfigManager::EnsureProjectConfiguration();
+	if (MigrationResult == EFU_OnlineConfigResult::Updated)
+	{
+		UE_LOG(LogFUOnlineSessionEditor, Log, TEXT("FU Online Session 已迁移历史项目配置；请重启编辑器使配置层重新加载"));
+	}
+
+	// 迁移完成后才注册设置回调；Settings 改动始终只保存插件专属域。
 	RegisterSettingsChangedHandler();
-	ApplyProjectConfiguration(false);
 }
 
 void FFUOnlineSessionEditorModule::RegisterSettingsChangedHandler()
@@ -69,54 +77,21 @@ void FFUOnlineSessionEditorModule::HandleSettingsChanged(
 		PropertyName.IsNone() ? TEXT("Unknown") : *PropertyName.ToString()
 	);
 
-	ApplyProjectConfiguration(true);
-}
-
-void FFUOnlineSessionEditorModule::ApplyProjectConfiguration(
-	const bool bShowEditorNotification
-)
-{
-	// 【Task 1 安全契约】旧配置管理器会写入项目 DefaultEngine.ini；普通生命周期必须保持无写入，
-	// Task 2 才会把它收敛为显式迁移入口，因此此处仅提示重启而不触发任何项目配置操作。
-	// 通知只用于用户主动修改设置的场景；编辑器启动时继续使用日志，避免每次打开项目都弹提示。
-	const auto ShowNotification = [bShowEditorNotification](
-		const FText& Text,
-		const SNotificationItem::ECompletionState CompletionState)
-	{
-		if (!bShowEditorNotification)
-		{
-			return;
-		}
-
-		FNotificationInfo NotificationInfo(Text);
-		NotificationInfo.ExpireDuration = 8.0f;
-		NotificationInfo.bUseSuccessFailIcons = true;
-		NotificationInfo.bUseLargeFont = false;
-
-		const TSharedPtr<SNotificationItem> Notification =
-			FSlateNotificationManager::Get().AddNotification(NotificationInfo);
-
-		if (Notification.IsValid())
-		{
-			Notification->SetCompletionState(CompletionState);
-		}
-	};
-
-	if (!bShowEditorNotification)
-	{
-		UE_LOG(LogFUOnlineSessionEditor, Log, TEXT("FU Online Session 启动时不再自动写入项目配置"));
-		return;
-	}
-
+	// 【设置变更】只保存插件自身配置并提示重启；禁止在此路径重跑迁移或写 DefaultEngine.ini。
 	UE_LOG(
 		LogFUOnlineSessionEditor,
 		Log,
 		TEXT("FU Online Session 设置已保存到插件配置；如需重新加载传输设置，请重启编辑器")
 	);
-	ShowNotification(
-		FText::FromString(TEXT("FU Online Session 设置已保存到插件配置；请重启编辑器后再测试联网")),
-		SNotificationItem::CS_None
-	);
+	FNotificationInfo NotificationInfo(FText::FromString(TEXT("FU Online Session 设置已保存到插件配置；请重启编辑器后再测试联网")));
+	NotificationInfo.ExpireDuration = 8.0f;
+	NotificationInfo.bUseSuccessFailIcons = true;
+	NotificationInfo.bUseLargeFont = false;
+	const TSharedPtr<SNotificationItem> Notification = FSlateNotificationManager::Get().AddNotification(NotificationInfo);
+	if (Notification.IsValid())
+	{
+		Notification->SetCompletionState(SNotificationItem::CS_None);
+	}
 }
 
 void FFUOnlineSessionEditorModule::ShutdownModule()
