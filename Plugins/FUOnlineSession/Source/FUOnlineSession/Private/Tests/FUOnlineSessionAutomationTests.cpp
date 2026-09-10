@@ -2,7 +2,10 @@
 
 #include "Misc/AutomationTest.h"
 #include "Misc/App.h"
+#include "HAL/FileManager.h"
 #include "FU_OnlineSessionTypes.h"
+#include "FU_OnlineDiagnosticTypes.h"
+#include "Diagnostics/FU_OnlineSessionDiagnostics.h"
 #include "FU_OnlineSessionRequestValidation.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
 #include "FU_SteamAppIdBootstrap.h"
@@ -10,6 +13,106 @@
 #include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFUOnlineSessionDefaultResultTest,"FUOnlineSession.Types.DefaultResult",EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionDiagnosticHistoryTest,
+	"FUOnlineSession.Diagnostics.History",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionDiagnosticHistoryTest::RunTest(const FString& Parameters)
+{
+	// 【先写契约】诊断历史必须有固定上限，而且无论调用方误传什么字段，都不能把房间密码保留到
+	// 日志、屏幕浮层或 Blueprint 事件中。这里关闭可选输出，只验证所有输出共享的脱敏历史源。
+	FFU_OnlineDiagnosticDispatchConfig Config;
+	Config.HistoryLimit = 2;
+	Config.bEmitToLog = false;
+	Config.bEnableOverlay = false;
+
+	int32 BlueprintBroadcastCount = 0;
+	FFU_OnlineSessionDiagnostics Diagnostics(
+		Config,
+		[&BlueprintBroadcastCount](const FFU_OnlineDiagnosticEvent&)
+		{
+			++BlueprintBroadcastCount;
+		});
+
+	FFU_OnlineDiagnosticEvent FirstEvent;
+	FirstEvent.Code = TEXT("FU.Test.First");
+	FFU_OnlineDiagnosticField SensitiveField;
+	SensitiveField.Key = FName(TEXT("RoomPassword"));
+	SensitiveField.Value = TEXT("secret");
+	FirstEvent.Fields.Add(SensitiveField);
+	Diagnostics.Emit(FirstEvent);
+
+	FFU_OnlineDiagnosticEvent SecondEvent;
+	SecondEvent.Code = TEXT("FU.Test.Second");
+	Diagnostics.Emit(SecondEvent);
+
+	FFU_OnlineDiagnosticEvent ThirdEvent;
+	ThirdEvent.Code = TEXT("FU.Test.Third");
+	Diagnostics.Emit(ThirdEvent);
+
+	const TArray<FFU_OnlineDiagnosticEvent> History = Diagnostics.GetHistory();
+	TestEqual(TEXT("诊断历史保留配置上限"), History.Num(), 2);
+	TestEqual(TEXT("最旧记录在超过上限时被移除"), History[0].Code, FString(TEXT("FU.Test.Second")));
+	TestEqual(TEXT("最新记录保持在历史末尾"), History[1].Code, FString(TEXT("FU.Test.Third")));
+	TestTrue(TEXT("诊断序号在同一 GameInstance 中严格递增"), History[0].Sequence < History[1].Sequence);
+	TestEqual(TEXT("关闭日志与浮层也不应关闭 Blueprint 诊断广播"), BlueprintBroadcastCount, 3);
+
+	const FFU_OnlineDiagnosticEvent SanitizedFirst = FFU_OnlineSessionDiagnostics::Sanitize(FirstEvent);
+	TestEqual(TEXT("敏感字段值必须被统一脱敏"), SanitizedFirst.Fields[0].Value, FString(TEXT("<redacted>")));
+
+	// 再写入一次含敏感字段的事件以验证最终报告，而不是只验证内存结构；该写入仍会受两条上限约束。
+	Diagnostics.Emit(FirstEvent);
+	const FString Report = Diagnostics.BuildReport();
+	TestFalse(TEXT("报告中绝不能出现原始房间密码"), Report.Contains(TEXT("secret"), ESearchCase::CaseSensitive));
+	TestTrue(TEXT("报告明确标出已脱敏字段"), Report.Contains(TEXT("RoomPassword=<redacted>"), ESearchCase::CaseSensitive));
+
+	FString SavedPath;
+	FString SaveError;
+	TestTrue(TEXT("诊断报告能保存到受限 Saved/Logs 目录"), Diagnostics.SaveReport(SavedPath, SaveError));
+	TestTrue(TEXT("保存成功时报告文件存在"), IFileManager::Get().FileExists(*SavedPath));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionDiagnosticOverlayModelTest,
+	"FUOnlineSession.Diagnostics.OverlayModel",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionDiagnosticOverlayModelTest::RunTest(const FString& Parameters)
+{
+	// 【模型测试】不创建真实 Viewport，证明无窗口/Commandlet 情况下浮层只是缺席的输出通道，
+	// 而不是让诊断分发器失效；纯模型也使严重级别和过期逻辑可稳定地自动化验证。
+	FFU_OnlineDiagnosticDispatchConfig Config;
+	Config.bEnableOverlay = true;
+	Config.MinimumOverlaySeverity = EFU_OnlineDiagnosticSeverity::Warning;
+	Config.OverlayDurationSeconds = 1.0f;
+	Config.OverlayRowLimit = 2;
+
+	FFU_OnlineDiagnosticOverlayModel OverlayModel;
+	const FDateTime NowUtc(2026, 9, 11, 12, 0, 0);
+
+	FFU_OnlineDiagnosticEvent InfoEvent;
+	InfoEvent.Severity = EFU_OnlineDiagnosticSeverity::Info;
+	InfoEvent.Code = TEXT("FU.Test.Info");
+	InfoEvent.Message = TEXT("Info must not be shown at Warning threshold");
+	OverlayModel.Add(InfoEvent, Config, NowUtc);
+	TestEqual(TEXT("Info 默认低于 Warning 浮层阈值"), OverlayModel.GetVisibleRows(NowUtc).Num(), 0);
+
+	FFU_OnlineDiagnosticEvent WarningEvent;
+	WarningEvent.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+	WarningEvent.Code = TEXT("FU.Test.Warning");
+	WarningEvent.Message = TEXT("Warning is visible");
+	OverlayModel.Add(WarningEvent, Config, NowUtc);
+	TestEqual(TEXT("Warning 进入可见浮层行"), OverlayModel.GetVisibleRows(NowUtc).Num(), 1);
+
+	TestEqual(
+		TEXT("过期浮层行自动隐藏"),
+		OverlayModel.GetVisibleRows(NowUtc + FTimespan::FromSeconds(2.0)).Num(),
+		0);
+	return true;
+}
 
 bool FFUOnlineSessionDefaultResultTest::RunTest(const FString& Parameters)
 {

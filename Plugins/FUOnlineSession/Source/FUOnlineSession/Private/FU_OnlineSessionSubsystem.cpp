@@ -6,6 +6,7 @@
 #include "FU_OnlineSessionSettings.h"
 #include "FU_SteamSocketsReadiness.h"
 #include "FUOnlineSessionModule.h"
+#include "Diagnostics/FU_OnlineSessionDiagnostics.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/NetDriver.h"
@@ -29,6 +30,20 @@ namespace FUOnlineSession
 {
 	const FName RoomNameSetting(TEXT("FU_RoomName"));
 	const FName RoomPasswordSetting(TEXT("FU_RoomPassword"));
+
+	/**
+	 * Task 1 已公开持久化 byte：0=Info、1=Warning、2=Error。
+	 * Task 4 的枚举增加了 Verbose=0，故这里必须显式转换，不能让旧 default=1 错映射为 Info。
+	 */
+	EFU_OnlineDiagnosticSeverity GetOverlayMinimumSeverity(const uint8 PersistedValue)
+	{
+		switch (PersistedValue)
+		{
+		case 0: return EFU_OnlineDiagnosticSeverity::Info;
+		case 1: return EFU_OnlineDiagnosticSeverity::Warning;
+		default: return EFU_OnlineDiagnosticSeverity::Error;
+		}
+	}
 
 	/**
 	 * 将机器可读状态转成适合调试和蓝图提示的文字。
@@ -1272,6 +1287,42 @@ void UFU_OnlineSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection
 {
 	Super::Initialize(Collection);
 
+	// 【每个 GameInstance 独立】PIE 多实例不能共享历史、浮层或 Blueprint 广播目标；
+	// 诊断分发器因此由本 Subsystem 创建和销毁，而不是由全局 Runtime Module 持有。
+	const UFU_OnlineSessionSettings& Settings = UFU_OnlineSessionSettings::GetRuntimeSettings();
+	FFU_OnlineDiagnosticDispatchConfig DiagnosticConfig;
+	DiagnosticConfig.HistoryLimit = Settings.DiagnosticHistoryLimit;
+	DiagnosticConfig.bEmitToLog = Settings.bEnableDiagnosticLog;
+	DiagnosticConfig.bEnableOverlay = Settings.bEnableDiagnosticOverlay;
+	DiagnosticConfig.MinimumOverlaySeverity = FUOnlineSession::GetOverlayMinimumSeverity(Settings.MinimumOverlaySeverity);
+	DiagnosticConfig.OverlayDurationSeconds = Settings.OverlayDurationSeconds;
+	DiagnosticConfig.OverlayRowLimit = Settings.OverlayRowLimit;
+
+	Diagnostics = TUniquePtr<FFU_OnlineSessionDiagnostics, FFU_OnlineSessionDiagnosticsDeleter>(
+		new FFU_OnlineSessionDiagnostics(
+			DiagnosticConfig,
+			[this](const FFU_OnlineDiagnosticEvent& Event)
+			{
+				// 【Blueprint 始终可见】是否输出 UE_LOG/屏幕浮层由配置决定，事件广播本身不被配置关闭。
+				OnOnlineDiagnosticEvent.Broadcast(Event);
+			}));
+
+	if (UWorld* World = GetWorld())
+	{
+		// 专用 Slate Widget 只在真实 GameViewport 存在时附着；Commandlet/无窗口测试仍保留完整历史。
+		Diagnostics->AttachViewport(World->GetGameViewport());
+	}
+
+	FFU_OnlineDiagnosticEvent StartupEvent;
+	StartupEvent.Operation = EFU_OnlineDiagnosticOperation::Environment;
+	StartupEvent.Phase = EFU_OnlineDiagnosticPhase::Completed;
+	StartupEvent.Severity = EFU_OnlineDiagnosticSeverity::Info;
+	StartupEvent.Code = TEXT("FU.Diagnostics.Initialized");
+	StartupEvent.Status = TEXT("Ready");
+	StartupEvent.Message = TEXT("FU Online Session 诊断分发器已初始化；后续事件将统一脱敏并可供 Blueprint 查询");
+	StartupEvent.RecommendedAction = TEXT("联机问题出现后调用 SaveDiagnosticReport，并附上 Saved/Logs/FUOnlineSession 中的报告");
+	FU_EmitDiagnostic(MoveTemp(StartupEvent));
+
 	// 【FU 修复：监听 Session 成功之后的失败】
 	// OnlineSubsystem 的 JoinSession 回调早于真正的网络握手，因此还要监听引擎旅行阶段。
 	if (GEngine)
@@ -1286,6 +1337,45 @@ void UFU_OnlineSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection
 	}
 }
 
+void FFU_OnlineSessionDiagnosticsDeleter::operator()(FFU_OnlineSessionDiagnostics* InDiagnostics) const
+{
+	// 【不完整类型隔离】Private 诊断实现只能在本 cpp 释放，Public Subsystem 头不会暴露 Slate/文件细节。
+	delete InDiagnostics;
+}
+
+TArray<FFU_OnlineDiagnosticEvent> UFU_OnlineSessionSubsystem::GetDiagnosticHistory() const
+{
+	return Diagnostics.IsValid() ? Diagnostics->GetHistory() : TArray<FFU_OnlineDiagnosticEvent>();
+}
+
+void UFU_OnlineSessionSubsystem::ClearDiagnosticHistory()
+{
+	if (Diagnostics.IsValid())
+	{
+		Diagnostics->ClearHistory();
+	}
+}
+
+FString UFU_OnlineSessionSubsystem::BuildDiagnosticReport() const
+{
+	return Diagnostics.IsValid()
+		? Diagnostics->BuildReport()
+		: TEXT("FU Online Session diagnostics are not initialized.");
+}
+
+bool UFU_OnlineSessionSubsystem::SaveDiagnosticReport(FString& OutSavedPath, FString& OutError)
+{
+	OutSavedPath.Reset();
+	OutError.Reset();
+	if (!Diagnostics.IsValid())
+	{
+		OutError = TEXT("FU Online Session 诊断分发器尚未初始化");
+		return false;
+	}
+
+	return Diagnostics->SaveReport(OutSavedPath, OutError);
+}
+
 TOptional<EFU_OnlineProvider> UFU_OnlineSessionSubsystem::FU_GetFailureProvider() const
 {
 	if (ActiveGameplayProvider.IsSet())
@@ -1294,6 +1384,38 @@ TOptional<EFU_OnlineProvider> UFU_OnlineSessionSubsystem::FU_GetFailureProvider(
 	}
 
 	return PreparedNetDriverProvider;
+}
+
+void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event)
+{
+	if (!Diagnostics.IsValid())
+	{
+		return;
+	}
+
+	// 【跨环境上下文】打包版没有 PIE WorldContext 时保持 INDEX_NONE；PIE 多窗口则记录实例号，
+	// 让导出的报告能区分服务器窗口和客户端窗口，而不是把它们的失败混为一谈。
+	if (const UWorld* World = GetWorld())
+	{
+		// GameInstanceSubsystem 可能早于可渲染 Viewport 初始化；每次发事件都幂等检查一次，
+		// 让随后出现的 PIE/打包窗口自动接上浮层，同时 AttachViewport 会在 World 切换时精确解绑旧窗口。
+		Diagnostics->AttachViewport(World->GetGameViewport());
+
+		if (Event.WorldName.IsEmpty())
+		{
+			Event.WorldName = World->GetName();
+		}
+
+		if (Event.PIEInstanceId == INDEX_NONE && GEngine)
+		{
+			if (const FWorldContext* WorldContext = GEngine->GetWorldContextFromWorld(World))
+			{
+				Event.PIEInstanceId = WorldContext->PIEInstance;
+			}
+		}
+	}
+
+	Diagnostics->Emit(Event);
 }
 
 void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
@@ -1321,6 +1443,23 @@ void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 		NetDriver ? *NetDriver->GetClass()->GetPathName() : TEXT("None"));
 
 	UE_LOG(LogFUOnlineSession, Error, TEXT("%s"), *FailureMessage);
+
+	FFU_OnlineDiagnosticEvent DiagnosticEvent;
+	DiagnosticEvent.Provider = Provider.GetValue();
+	DiagnosticEvent.Operation = EFU_OnlineDiagnosticOperation::Recovery;
+	DiagnosticEvent.Phase = EFU_OnlineDiagnosticPhase::Callback;
+	DiagnosticEvent.Severity = EFU_OnlineDiagnosticSeverity::Error;
+	DiagnosticEvent.Code = TEXT("FU.NetworkFailure");
+	DiagnosticEvent.Status = ENetworkFailure::ToString(FailureType);
+	DiagnosticEvent.Message = FailureMessage;
+	DiagnosticEvent.Cause = ErrorString;
+	DiagnosticEvent.RecommendedAction = TEXT("检查同一 OperationId 的前置诊断、NetDriver 配置和双方网络日志");
+	FFU_OnlineDiagnosticField NetDriverField;
+	NetDriverField.Key = FName(TEXT("NetDriverClass"));
+	NetDriverField.Value = NetDriver ? NetDriver->GetClass()->GetPathName() : TEXT("None");
+	DiagnosticEvent.Fields.Add(MoveTemp(NetDriverField));
+	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
+
 	OnOnlineConnectionFailure.Broadcast(
 		Provider.GetValue(),
 		EFU_OnlineConnectionFailureType::NetworkFailure,
@@ -1350,6 +1489,23 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 		*ErrorString);
 
 	UE_LOG(LogFUOnlineSession, Error, TEXT("%s"), *FailureMessage);
+
+	FFU_OnlineDiagnosticEvent DiagnosticEvent;
+	DiagnosticEvent.Provider = Provider.GetValue();
+	DiagnosticEvent.Operation = EFU_OnlineDiagnosticOperation::Recovery;
+	DiagnosticEvent.Phase = EFU_OnlineDiagnosticPhase::Callback;
+	DiagnosticEvent.Severity = EFU_OnlineDiagnosticSeverity::Error;
+	DiagnosticEvent.Code = TEXT("FU.TravelFailure");
+	DiagnosticEvent.Status = UEnum::GetValueAsString(FailureType);
+	DiagnosticEvent.Message = FailureMessage;
+	DiagnosticEvent.Cause = ErrorString;
+	DiagnosticEvent.RecommendedAction = TEXT("检查地图路径、NetDriver 前置状态以及同一 OperationId 的联机诊断");
+	FFU_OnlineDiagnosticField FailureTypeField;
+	FailureTypeField.Key = FName(TEXT("TravelFailureType"));
+	FailureTypeField.Value = UEnum::GetValueAsString(FailureType);
+	DiagnosticEvent.Fields.Add(MoveTemp(FailureTypeField));
+	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
+
 	OnOnlineConnectionFailure.Broadcast(
 		Provider.GetValue(),
 		EFU_OnlineConnectionFailureType::TravelFailure,
@@ -1358,6 +1514,13 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 
 void UFU_OnlineSessionSubsystem::Deinitialize()
 {
+	// 先撤销精确添加的 Slate Widget，再释放分发器，避免 Viewport 在 GameInstance 析构后持有失效引用。
+	if (Diagnostics.IsValid())
+	{
+		Diagnostics->DetachViewport();
+		Diagnostics.Reset();
+	}
+
 	// 引擎委托的生命周期长于 GameInstanceSubsystem，必须先解绑，避免对象销毁后仍收到回调。
 	if (GEngine)
 	{

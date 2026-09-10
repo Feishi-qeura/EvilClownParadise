@@ -6,11 +6,23 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Engine/EngineBaseTypes.h"
 #include "Net/Core/Connection/NetEnums.h"
+#include "Templates/UniquePtr.h"
+#include "FU_OnlineDiagnosticTypes.h"
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineSessionSubsystem.generated.h"
 
 // 【自包含声明】该头只通过指针接收 NetDriver；明确前置声明避免严格编译依赖 PCH 间接包含。
 class UNetDriver;
+class FFU_OnlineSessionDiagnostics;
+
+/**
+ * 诊断分发器是 Private 实现；自定义删除器避免把私有 Slate/文件实现暴露到 Public 头，
+ * 同时满足严格编译下 TUniquePtr 删除不完整类型的要求。
+ */
+struct FFU_OnlineSessionDiagnosticsDeleter
+{
+	void operator()(FFU_OnlineSessionDiagnostics* Diagnostics) const;
+};
 
 
 
@@ -37,6 +49,28 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category="FUOnlineSession|Online Session|LAN|Status")
 	FFU_OnlineProviderStatus CheckLanProviderStatus() const;
+
+	/**
+	 * 返回本 GameInstance 的有界、已脱敏诊断历史。
+	 * 该数组是副本，Blueprint 不会修改 Runtime 内部的故障调查记录。
+	 */
+	UFUNCTION(BlueprintPure, Category="FUOnlineSession|Diagnostics")
+	TArray<FFU_OnlineDiagnosticEvent> GetDiagnosticHistory() const;
+
+	/** 清除当前 GameInstance 的诊断历史；不会关闭后续日志、浮层或 Blueprint 广播。 */
+	UFUNCTION(BlueprintCallable, Category="FUOnlineSession|Diagnostics")
+	void ClearDiagnosticHistory();
+
+	/** 生成当前诊断快照的安全纯文本；不写文件，适合 Blueprint UI 预览或复制。 */
+	UFUNCTION(BlueprintPure, Category="FUOnlineSession|Diagnostics")
+	FString BuildDiagnosticReport() const;
+
+	/**
+	 * 将已脱敏报告保存到 Project/Saved/Logs/FUOnlineSession。
+	 * 输出路径由插件固定，Blueprint 无法传入任意路径，失败时只返回安全的错误说明。
+	 */
+	UFUNCTION(BlueprintCallable, Category="FUOnlineSession|Diagnostics")
+	bool SaveDiagnosticReport(FString& OutSavedPath, FString& OutError);
 	
 	//Steam蓝图入口:负责选择Provider，实现由template去做
 	/* Steam创建房间
@@ -98,6 +132,13 @@ public:
 	 */
 	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session|Provider")
 	FFU_OnOnlineConnectionFailure OnOnlineConnectionFailure;
+
+	/**
+	 * 所有渠道共用同一份已脱敏事件：即使关闭 UE_LOG 或屏幕浮层，Blueprint 仍会收到它。
+	 * UI 可以按 Severity、Code 和 OperationId 显示提示或上传安全诊断报告。
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Diagnostics")
+	FFU_OnOnlineDiagnosticEvent OnOnlineDiagnosticEvent;
 
 private:
 	//状态，待处理操作
@@ -203,6 +244,9 @@ private:
 	//引擎级失败委托必须保存 Handle，并在 GameInstanceSubsystem 销毁时显式解绑。
 	FDelegateHandle NetworkFailureDelegateHandle;
 	FDelegateHandle TravelFailureDelegateHandle;
+
+	// 每个 GameInstance 独占自己的诊断历史和 Slate 生命周期，避免 PIE 多实例串台。
+	TUniquePtr<FFU_OnlineSessionDiagnostics, FFU_OnlineSessionDiagnosticsDeleter> Diagnostics;
 	
 	//声明模板成员函数
 	template<EFU_OnlineProvider Provider> 
@@ -309,4 +353,7 @@ private:
 
 	//旅行失败时优先使用活动 Provider，否则使用最近准备过驱动的 Provider。
 	TOptional<EFU_OnlineProvider> FU_GetFailureProvider() const;
+
+	/** 为系统级失败补齐 World/PIE 上下文后进入统一诊断分发器。 */
+	void FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event);
 };
