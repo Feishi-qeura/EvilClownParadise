@@ -1,6 +1,5 @@
 #include "FUOnlineSessionEditorModule.h"
 
-#include "FUOnlineSessionConfigManager.h"
 #include "FU_OnlineSessionSettings.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Misc/Paths.h"
@@ -12,13 +11,13 @@ DEFINE_LOG_CATEGORY_STATIC(LogFUOnlineSessionEditor, Log, All);
 
 void FFUOnlineSessionEditorModule::StartupModule()
 {
-	// Cook、命令行工具以及没有工程上下文的进程不应修改项目源配置。
+	// Cook、命令行工具以及没有工程上下文的进程不应注册 Editor 设置回调。
 	if (IsRunningCommandlet() || !FPaths::IsProjectFilePathSet())
 	{
 		return;
 	}
 
-	// 先注册设置回调，之后用户在 Project Settings 中修改选项即可立即重新生成配置。
+	// 先注册设置回调；普通启动只读取插件配置，绝不写入项目 DefaultEngine.ini。
 	RegisterSettingsChangedHandler();
 	ApplyProjectConfiguration(false);
 }
@@ -66,7 +65,7 @@ void FFUOnlineSessionEditorModule::HandleSettingsChanged(
 	UE_LOG(
 		LogFUOnlineSessionEditor,
 		Log,
-		TEXT("FU Online Session 设置已改变：%s，开始同步 DefaultEngine.ini"),
+		TEXT("FU Online Session 设置已改变：%s，已保存插件专属配置，不会写入 DefaultEngine.ini"),
 		PropertyName.IsNone() ? TEXT("Unknown") : *PropertyName.ToString()
 	);
 
@@ -77,9 +76,8 @@ void FFUOnlineSessionEditorModule::ApplyProjectConfiguration(
 	const bool bShowEditorNotification
 )
 {
-	const EFU_OnlineConfigResult Result =
-		FFUOnlineSessionConfigManager::EnsureProjectConfiguration();
-
+	// 【Task 1 安全契约】旧配置管理器会写入项目 DefaultEngine.ini；普通生命周期必须保持无写入，
+	// Task 2 才会把它收敛为显式迁移入口，因此此处仅提示重启而不触发任何项目配置操作。
 	// 通知只用于用户主动修改设置的场景；编辑器启动时继续使用日志，避免每次打开项目都弹提示。
 	const auto ShowNotification = [bShowEditorNotification](
 		const FText& Text,
@@ -104,59 +102,21 @@ void FFUOnlineSessionEditorModule::ApplyProjectConfiguration(
 		}
 	};
 
-	switch (Result)
+	if (!bShowEditorNotification)
 	{
-	case EFU_OnlineConfigResult::Updated:
-		// 配置层在本次启动早期已经加载，写盘后必须等下次启动才会完全生效。
-		UE_LOG(
-			LogFUOnlineSessionEditor,
-			Warning,
-			TEXT("FU Online Session 已更新 DefaultEngine.ini，请重启编辑器使配置完全生效")
-		);
-		ShowNotification(
-			FText::FromString(TEXT("FU Online Session 配置已更新，请重启编辑器后再测试联网")),
-			SNotificationItem::CS_Success
-		);
-		break;
-
-	case EFU_OnlineConfigResult::Unchanged:
-		UE_LOG(LogFUOnlineSessionEditor, Log, TEXT("FU Online Session 配置已经是最新状态"));
-		break;
-
-	case EFU_OnlineConfigResult::Disabled:
-		UE_LOG(LogFUOnlineSessionEditor, Log, TEXT("FU Online Session 自动配置已关闭"));
-		ShowNotification(
-			FText::FromString(TEXT("FU Online Session 自动配置已关闭；已有管理区块不会被自动删除")),
-			SNotificationItem::CS_None
-		);
-		break;
-
-	case EFU_OnlineConfigResult::Conflict:
-		UE_LOG(
-			LogFUOnlineSessionEditor,
-			Error,
-			TEXT("FU Online Session 检测到自定义 GameNetDriver，未覆盖 DefaultEngine.ini")
-		);
-		ShowNotification(
-			FText::FromString(TEXT("检测到自定义 GameNetDriver，FU Online Session 已停止自动覆盖配置")),
-			SNotificationItem::CS_Fail
-		);
-		break;
-
-	case EFU_OnlineConfigResult::Failed:
-	default:
-		// 失败时绝不继续覆盖文件，保留用户已有配置以便人工检查。
-		UE_LOG(
-			LogFUOnlineSessionEditor,
-			Error,
-			TEXT("FU Online Session 无法更新 DefaultEngine.ini，请检查文件权限或自动配置标记")
-		);
-		ShowNotification(
-			FText::FromString(TEXT("FU Online Session 配置更新失败，请查看 Output Log")),
-			SNotificationItem::CS_Fail
-		);
-		break;
+		UE_LOG(LogFUOnlineSessionEditor, Log, TEXT("FU Online Session 启动时不再自动写入项目配置"));
+		return;
 	}
+
+	UE_LOG(
+		LogFUOnlineSessionEditor,
+		Log,
+		TEXT("FU Online Session 设置已保存到插件配置；如需重新加载传输设置，请重启编辑器")
+	);
+	ShowNotification(
+		FText::FromString(TEXT("FU Online Session 设置已保存到插件配置；请重启编辑器后再测试联网")),
+		SNotificationItem::CS_None
+	);
 }
 
 void FFUOnlineSessionEditorModule::ShutdownModule()

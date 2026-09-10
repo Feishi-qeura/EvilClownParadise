@@ -135,6 +135,10 @@ bool FFUOnlineSessionDescriptorConfigContractTest::RunTest(const FString& Parame
 	const FString PluginDirectory = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("FUOnlineSession"));
 	const FString DescriptorPath = FPaths::Combine(PluginDirectory, TEXT("FUOnlineSession.uplugin"));
 	const FString EngineIniPath = FPaths::Combine(PluginDirectory, TEXT("Config/Engine.ini"));
+	const FString DefaultSettingsIniPath = FPaths::Combine(PluginDirectory, TEXT("Config/DefaultFUOnlineSession.ini"));
+	const FString EditorModuleSourcePath = FPaths::Combine(
+		PluginDirectory,
+		TEXT("Source/FUOnlineSessionEditor/Private/FUOnlineSessionEditorModule.cpp"));
 
 	FPluginDescriptor Descriptor;
 	FText DescriptorLoadFailure;
@@ -210,6 +214,19 @@ bool FFUOnlineSessionDescriptorConfigContractTest::RunTest(const FString& Parame
 	TestTrue(TEXT("Engine.ini 解析 Steam P2P 中继开关"), EngineIni.GetBool(TEXT("OnlineSubsystemSteam"), TEXT("bAllowP2PPacketRelay"), bAllowP2PPacketRelay));
 	TestTrue(TEXT("Engine.ini 允许 Steam P2P 中继"), bAllowP2PPacketRelay);
 	TestFalse(TEXT("Engine.ini 不得保存开发 Steam AppID"), EngineIniText.Contains(TEXT("SteamDevAppId=")));
+
+	FString DefaultSettingsIniText;
+	TestTrue(TEXT("能够读取插件专属默认设置 ini"), FFileHelper::LoadFileToString(DefaultSettingsIniText, *DefaultSettingsIniPath));
+	TestTrue(TEXT("默认设置 ini 明确配置 SteamDevAppId=480"), DefaultSettingsIniText.Contains(TEXT("SteamDevAppId=480")));
+	TestTrue(TEXT("默认设置 ini 明确配置 ExpectedShippingSteamAppId=0"), DefaultSettingsIniText.Contains(TEXT("ExpectedShippingSteamAppId=0")));
+	TestTrue(TEXT("默认设置 ini 明确配置 OperationTimeoutSeconds=30.0"), DefaultSettingsIniText.Contains(TEXT("OperationTimeoutSeconds=30.0")));
+
+	FString EditorModuleSource;
+	TestTrue(TEXT("能够读取 FU Online Session Editor 模块实现"), FFileHelper::LoadFileToString(EditorModuleSource, *EditorModuleSourcePath));
+	// 【安全契约】正常启动和设置变更不能再触发旧写入器，避免插件静默修改项目 DefaultEngine.ini。
+	TestFalse(
+		TEXT("Editor 生命周期不再调用旧项目配置写入器"),
+		EditorModuleSource.Contains(TEXT("FFUOnlineSessionConfigManager::EnsureProjectConfiguration")));
 
 	const UFU_OnlineSessionSettings* Settings = GetDefault<UFU_OnlineSessionSettings>();
 	TestEqual(TEXT("设置保存到插件专属配置域"), Settings->GetClass()->ClassConfigName, FName(TEXT("FUOnlineSession")));
