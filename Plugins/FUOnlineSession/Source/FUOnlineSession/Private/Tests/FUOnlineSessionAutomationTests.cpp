@@ -135,25 +135,6 @@ bool FFUOnlineSessionProviderNetDriverStatusTest::RunTest(const FString& Paramet
 	Inputs.bHasNetDriverDefinition = true;
 	Inputs.bHasNetDriverClass = true;
 	Inputs.bHasConflictingActiveNetDriver = true;
-	TestEqual(
-		TEXT("活动驱动属于另一个 Provider 时拒绝切换"),
-		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
-		EFU_OnlineProviderStatusCode::ActiveNetDriverConflict);
-
-	Inputs.bHasConflictingActiveNetDriver = false;
-	Inputs.bHasNetDriverDefinition = false;
-	TestEqual(
-		TEXT("缺少 GameNetDriver Definition 时返回明确状态"),
-		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
-		EFU_OnlineProviderStatusCode::NetDriverDefinitionUnavailable);
-
-	// 这正是本次日志暴露的问题：Steam 子系统可用，但目标 Steam 驱动类不能加载。
-	Inputs.bHasNetDriverDefinition = true;
-	Inputs.bHasNetDriverClass = false;
-	TestEqual(
-		TEXT("Steam NetDriver 类不可加载时不能误报 Ready"),
-		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
-		EFU_OnlineProviderStatusCode::NetDriverClassUnavailable);
 
 	Inputs.bHasNetDriverClass = true;
 	TestEqual(

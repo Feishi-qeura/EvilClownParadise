@@ -47,24 +47,6 @@ public:
 			return EFU_OnlineProviderStatusCode::SessionInterfaceUnavailable;
 		}
 
-		// Session Interface 只负责会话操作；没有 GameNetDriver 时无法 Listen 或 ClientTravel。
-		if (!Inputs.bHasNetDriverDefinition)
-		{
-			return EFU_OnlineProviderStatusCode::NetDriverDefinitionUnavailable;
-		}
-
-		// 目标驱动类不可用时必须提前失败，不能让引擎静默回退后再解析错误地址。
-		if (!Inputs.bHasNetDriverClass)
-		{
-			return EFU_OnlineProviderStatusCode::NetDriverClassUnavailable;
-		}
-
-		// NetDriver 属于当前网络世界；正在使用另一种驱动时不能热切换 Provider。
-		if (Inputs.bHasConflictingActiveNetDriver)
-		{
-			return EFU_OnlineProviderStatusCode::ActiveNetDriverConflict;
-		}
-
 		// NULL/LAN 只依赖 Session Interface，不需要平台账号身份。
 		if (Provider == EFU_OnlineProvider::Lan)
 		{

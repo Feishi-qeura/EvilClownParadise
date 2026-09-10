@@ -68,16 +68,8 @@ enum class EFU_OnlineProviderStatusCode : uint8
 	IdentityInterfaceUnavailable UMETA(DisplayName = "Identity Interface Unavailable"),
 
 	//Steam Identity存在，但本地用户0当前没有登录Steam
-	NotLoggedIn UMETA(DisplayName = "Not Logged In"),
+	NotLoggedIn UMETA(DisplayName = "Not Logged In")
 
-	//引擎配置中没有名为 GameNetDriver 的定义，无法决定地图连接使用哪一种驱动
-	NetDriverDefinitionUnavailable UMETA(DisplayName = "NetDriver Definition Unavailable"),
-
-	//Provider 要求的驱动类没有加载；Steam 最常见原因是 SteamSockets 插件没有启用
-	NetDriverClassUnavailable UMETA(DisplayName = "NetDriver Class Unavailable"),
-
-	//当前 World 已经使用另一种驱动联网，必须先退出该网络世界才能切换 Provider
-	ActiveNetDriverConflict UMETA(DisplayName = "Active NetDriver Conflict")
 };
 
 /**
@@ -198,9 +190,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FFU_OnJoinSessionCompleteV2, EFU_On
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FFU_OnDestroySessionComplete, EFU_OnlineProvider, Provider, bool, bWasSuccessful);
 
-//【FU 修复：旅行阶段错误】JoinSession Success 之后的网络/地图错误通过独立事件返回蓝图。
+/*//【FU 修复：旅行阶段错误】JoinSession Success 之后的网络/地图错误通过独立事件返回蓝图。
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
 	FFU_OnOnlineConnectionFailure,
 	EFU_OnlineProvider, Provider,
 	EFU_OnlineConnectionFailureType, FailureType,
-	const FString&, Message);
+	const FString&, Message);*/

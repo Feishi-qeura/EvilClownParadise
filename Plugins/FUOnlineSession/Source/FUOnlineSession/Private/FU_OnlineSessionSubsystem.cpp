@@ -61,19 +61,6 @@ namespace FUOnlineSession
 		case EFU_OnlineProviderStatusCode::NotLoggedIn:
 			return TEXT("本地用户尚未登录 Steam，请先启动并登录 Steam 客户端");
 
-		case EFU_OnlineProviderStatusCode::NetDriverDefinitionUnavailable:
-			return TEXT("引擎没有 GameNetDriver 定义，FU Online Session 无法准备地图连接驱动");
-
-		case EFU_OnlineProviderStatusCode::NetDriverClassUnavailable:
-			return FString::Printf(
-				TEXT("%s 所需的 NetDriver 类不可用，请检查 FUOnlineSession 的传输插件依赖"),
-				ProviderName);
-
-		case EFU_OnlineProviderStatusCode::ActiveNetDriverConflict:
-			return FString::Printf(
-				TEXT("当前 World 正在使用另一种 NetDriver；请先退出联网关卡，再切换到 %s"),
-				ProviderName);
-
 		default:
 			return TEXT("未知的在线提供方状态");
 		}
@@ -142,7 +129,7 @@ IOnlineSessionPtr UFU_OnlineSessionSubsystem::FU_GetSessionInterface() const
 }
 
 //【FU 修复：Provider 同时选择会话层和传输层】
-template<EFU_OnlineProvider Provider>
+/*template<EFU_OnlineProvider Provider>
 bool UFU_OnlineSessionSubsystem::FU_PrepareGameNetDriver()
 {
 	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
@@ -237,6 +224,7 @@ bool UFU_OnlineSessionSubsystem::FU_PrepareGameNetDriver()
 
 	return true;
 }
+*/
 
 //运行时状态检测模板：只读取接口状态，不缓存接口，也不改变 Provider 的异步操作状态。
 template<EFU_OnlineProvider Provider>
@@ -678,7 +666,7 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal()
         return;
     }
 
-	// 【FU 修复：Host 传输层】CreateSession 完成后蓝图会 OpenLevel(?listen)。
+	/*// 【FU 修复：Host 传输层】CreateSession 完成后蓝图会 OpenLevel(?listen)。
 	// 必须在 Listen NetDriver 创建以前，根据模板 Provider 准备正确驱动。
 	if (!FU_PrepareGameNetDriver<Provider>())
 	{
@@ -688,7 +676,7 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal()
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
-
+*/
     APlayerController* PlayerController = FU_GetLocalPlayerController();
 
     if (!State.SessionInterface.IsValid() || !PlayerController || !PlayerController->GetLocalPlayer())
@@ -1023,7 +1011,7 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal()
 		return;
 	}
 
-	// 【FU 修复：Client 传输层】JoinSession 成功回调会立即执行 ClientTravel，
+	/*// 【FU 修复：Client 传输层】JoinSession 成功回调会立即执行 ClientTravel，
 	// 因此必须在向 OnlineSubsystem 发起 Join 之前完成模板化 NetDriver 选择。
 	if (!FU_PrepareGameNetDriver<Provider>())
 	{
@@ -1031,7 +1019,7 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal()
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::NetDriverUnavailable);
 		return;
 	}
-
+*/
 	State.OperationState = EFU_ProviderOperationState::Joining;
 
 	//将Provider编译进回调函数地址
@@ -1186,11 +1174,7 @@ void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 		*ErrorString,
 		NetDriver ? *NetDriver->GetClass()->GetPathName() : TEXT("None"));
 
-	UE_LOG(LogFUOnlineSession, Error, TEXT("%s"), *FailureMessage);
-	OnOnlineConnectionFailure.Broadcast(
-		Provider.GetValue(),
-		EFU_OnlineConnectionFailureType::NetworkFailure,
-		FailureMessage);
+
 }
 
 void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
@@ -1215,11 +1199,6 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 		*UEnum::GetValueAsString(FailureType),
 		*ErrorString);
 
-	UE_LOG(LogFUOnlineSession, Error, TEXT("%s"), *FailureMessage);
-	OnOnlineConnectionFailure.Broadcast(
-		Provider.GetValue(),
-		EFU_OnlineConnectionFailureType::TravelFailure,
-		FailureMessage);
 }
 
 void UFU_OnlineSessionSubsystem::Deinitialize()

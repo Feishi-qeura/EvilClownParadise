@@ -94,8 +94,8 @@ public:
 	 * JoinSession 的 Success 只表示已经取得连接地址并开始 ClientTravel。
 	 * 随后的 PendingConnectionFailure、地图不存在等错误会从本事件返回蓝图。
 	 */
-	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session|Provider")
-	FFU_OnOnlineConnectionFailure OnOnlineConnectionFailure;
+	//UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session|Provider")
+	//FFU_OnOnlineConnectionFailure OnOnlineConnectionFailure;
 
 private:
 	//状态，待处理操作
@@ -222,8 +222,8 @@ private:
 	 * Provider 在编译期决定 GameNetDriver：Steam -> SteamSockets，LAN -> IpNetDriver。
 	 * 函数必须在 OpenLevel(?listen) 或 ClientTravel 创建 NetDriver 之前调用。
 	 */
-	template<EFU_OnlineProvider Provider>
-	bool FU_PrepareGameNetDriver();
+	//template<EFU_OnlineProvider Provider>
+	//bool FU_PrepareGameNetDriver();
 	
 	template<EFU_OnlineProvider Provider> 
 	void FU_CreateSession(int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword);
