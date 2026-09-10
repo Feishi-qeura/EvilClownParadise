@@ -9,7 +9,8 @@
 			"Type": "Runtime",
 			"LoadingPhase": "Default",
 			"AdditionalDependencies": [
-				"Engine"
+				"Engine",
+				"AIModule"
 			]
 		}
 	],
@@ -23,6 +24,10 @@
 		},
 		{
 			"Name": "FUOnlineSession",
+			"Enabled": true
+		},
+		{
+			"Name": "GameplayStateTree",
 			"Enabled": true
 		}
 	]

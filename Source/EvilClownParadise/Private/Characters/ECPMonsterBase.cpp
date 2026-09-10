@@ -3,3 +3,7 @@
 
 #include "Characters/ECPMonsterBase.h"
 
+AECPMonsterBase::AECPMonsterBase()
+{
+	
+}
