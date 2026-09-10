@@ -27,6 +27,22 @@ struct TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>
 		return TEXT("Steam");
 	}
 
+	/**
+	 * 【FU 修复：Steam 传输层】
+	 * OnlineSubsystemSteam 负责 Lobby 的创建和发现；真正执行地图连接的是 NetDriver。
+	 * Steam Lobby 返回 steam.<SteamId> 形式的 P2P 地址，所以不能交给普通 IpNetDriver。
+	 */
+	static FName GetNetDriverClassName()
+	{
+		return TEXT("/Script/SteamSockets.SteamSocketsNetDriver");
+	}
+
+	/** SteamSocketsNetDriver 创建连接对象时使用的配套 NetConnection 类型。 */
+	static FName GetNetConnectionClassName()
+	{
+		return TEXT("/Script/SteamSockets.SteamSocketsNetConnection");
+	}
+
 	static void ConfigureCreateSettings(FOnlineSessionSettings& Settings)
 	{
 		Settings.bIsLANMatch = false;
@@ -62,6 +78,21 @@ struct TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Lan>
 	static const TCHAR* GetDebugName()
 	{
 		return TEXT("NULL LAN");
+	}
+
+	/**
+	 * 【FU 修复：LAN 传输层】
+	 * NULL Session 返回普通 IPv4 地址，局域网 Listen Server 应继续使用 IpNetDriver。
+	 */
+	static FName GetNetDriverClassName()
+	{
+		return TEXT("/Script/OnlineSubsystemUtils.IpNetDriver");
+	}
+
+	/** IpNetDriver 创建连接对象时使用的标准 IpConnection 类型。 */
+	static FName GetNetConnectionClassName()
+	{
+		return TEXT("/Script/OnlineSubsystemUtils.IpConnection");
 	}
 
 	static void ConfigureCreateSettings(FOnlineSessionSettings& Settings)

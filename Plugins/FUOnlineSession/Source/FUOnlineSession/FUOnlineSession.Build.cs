@@ -20,7 +20,11 @@ public class FUOnlineSession : ModuleRules
         DynamicallyLoadedModuleNames.AddRange(new[]
         {
             "OnlineSubsystemSteam",
-            "OnlineSubsystemNull"
+            "OnlineSubsystemNull",
+
+            // 【FU 修复：Steam 传输依赖】
+            // Lobby 的创建/搜索属于 OnlineSubsystemSteam；steam.<SteamId> 的实际连接由 SteamSockets 解析。
+            "SteamSockets"
         });
     }
 }

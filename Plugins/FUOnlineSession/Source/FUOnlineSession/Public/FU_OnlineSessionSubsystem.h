@@ -4,6 +4,8 @@
 #include "Interfaces/OnlineSessionInterface.h"
 #include "OnlineSessionSettings.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Net/Core/Connection/NetEnums.h"
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineSessionSubsystem.generated.h"
 
@@ -17,6 +19,7 @@ class FUONLINESESSION_API UFU_OnlineSessionSubsystem : public UGameInstanceSubsy
 	GENERATED_BODY()
 
 public:
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
 	/**
@@ -85,6 +88,14 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session|Provider")
 	FFU_OnDestroySessionComplete OnDestroySessionComplete;
+
+	/**
+	 * 【FU 修复：连接阶段错误】
+	 * JoinSession 的 Success 只表示已经取得连接地址并开始 ClientTravel。
+	 * 随后的 PendingConnectionFailure、地图不存在等错误会从本事件返回蓝图。
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "FUOnlineSession|Online Session|Provider")
+	FFU_OnOnlineConnectionFailure OnOnlineConnectionFailure;
 
 private:
 	//状态，待处理操作
@@ -183,6 +194,13 @@ private:
 
 	//搜索不会修改该值；只有创建或加入成功后才记录当前实际游戏会话是否是NULL还是Lobby
 	TOptional<EFU_OnlineProvider> ActiveGameplayProvider;
+
+	//记录最近一次为 Create/Join 准备的驱动；网络失败发生在活动会话记录之前时也能判断来源。
+	TOptional<EFU_OnlineProvider> PreparedNetDriverProvider;
+
+	//引擎级失败委托必须保存 Handle，并在 GameInstanceSubsystem 销毁时显式解绑。
+	FDelegateHandle NetworkFailureDelegateHandle;
+	FDelegateHandle TravelFailureDelegateHandle;
 	
 	//声明模板成员函数
 	template<EFU_OnlineProvider Provider> 
@@ -195,9 +213,17 @@ private:
 	template<EFU_OnlineProvider Provider> 
 	IOnlineSessionPtr FU_GetSessionInterface() const;
 
-	// 与创建/搜索模板相同：蓝图入口分开，状态检测核心通过 Provider 在编译期选择实现。
+	//与创建/搜索模板相同：蓝图入口分开，状态检测核心通过 Provider 在编译期选择实现。
 	template<EFU_OnlineProvider Provider>
 	FFU_OnlineProviderStatus FU_CheckProviderStatus() const;
+
+	/**
+	 * 【FU 修复：模板化传输选择】
+	 * Provider 在编译期决定 GameNetDriver：Steam -> SteamSockets，LAN -> IpNetDriver。
+	 * 函数必须在 OpenLevel(?listen) 或 ClientTravel 创建 NetDriver 之前调用。
+	 */
+	template<EFU_OnlineProvider Provider>
+	bool FU_PrepareGameNetDriver();
 	
 	template<EFU_OnlineProvider Provider> 
 	void FU_CreateSession(int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword);
@@ -265,4 +291,11 @@ private:
 	void FU_ClearProviderState();
 	
 	APlayerController* FU_GetLocalPlayerController() const;
+
+	//只处理属于当前 GameInstance World 的引擎错误，避免 PIE 多 World 互相接收通知。
+	void FU_OnNetworkFailure(UWorld* World, UNetDriver* NetDriver, ENetworkFailure::Type FailureType, const FString& ErrorString);
+	void FU_OnTravelFailure(UWorld* World, ETravelFailure::Type FailureType, const FString& ErrorString);
+
+	//旅行失败时优先使用活动 Provider，否则使用最近准备过驱动的 Provider。
+	TOptional<EFU_OnlineProvider> FU_GetFailureProvider() const;
 };

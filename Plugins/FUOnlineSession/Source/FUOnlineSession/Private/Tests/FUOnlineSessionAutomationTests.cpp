@@ -5,6 +5,7 @@
 #include "FU_OnlineSessionRequestValidation.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
 #include "FU_CheckSessionStatusAsync.h"
+#include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFUOnlineSessionDefaultResultTest,"FUOnlineSession.Types.DefaultResult",EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -60,6 +61,8 @@ bool FFUOnlineSessionProviderStatusEvaluationTest::RunTest(const FString& Parame
 		EFU_OnlineProviderStatusCode::SessionInterfaceUnavailable);
 
 	Inputs.bHasSessionInterface = true;
+	Inputs.bHasNetDriverDefinition = true;
+	Inputs.bHasNetDriverClass = true;
 	Inputs.bHasIdentityInterface = false;
 	Inputs.bIsLoggedIn = false;
 
@@ -85,6 +88,76 @@ bool FFUOnlineSessionProviderStatusEvaluationTest::RunTest(const FString& Parame
 
 	TestEqual(
 		TEXT("Steam 所有依赖可用时返回 Ready"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::Ready);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionProviderNetDriverTraitsTest,
+	"FUOnlineSession.ProviderTraits.NetDriverSelection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionProviderNetDriverTraitsTest::RunTest(const FString& Parameters)
+{
+	// 这个测试防止 Steam Lobby 再次被交给 IpNetDriver。
+	// 一旦映射错误，steam.<SteamId> 会被当作普通 DNS 主机名并产生 AddressResolutionFailed。
+	TestEqual(
+		TEXT("Steam Provider 必须选择 SteamSocketsNetDriver"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::GetNetDriverClassName(),
+		FName(TEXT("/Script/SteamSockets.SteamSocketsNetDriver")));
+
+	// NULL/LAN 的解析结果是 IPv4 地址，因此它必须继续使用标准 IpNetDriver。
+	TestEqual(
+		TEXT("LAN Provider 必须选择 IpNetDriver"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Lan>::GetNetDriverClassName(),
+		FName(TEXT("/Script/OnlineSubsystemUtils.IpNetDriver")));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionProviderNetDriverStatusTest,
+	"FUOnlineSession.ProviderStatus.NetDriverRequirements",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionProviderNetDriverStatusTest::RunTest(const FString& Parameters)
+{
+	FFU_OnlineProviderStatusInputs Inputs;
+	Inputs.bHasWorld = true;
+	Inputs.bHasSubsystem = true;
+	Inputs.bHasSessionInterface = true;
+	Inputs.bHasIdentityInterface = true;
+	Inputs.bIsLoggedIn = true;
+
+	// Session/Identity 正常并不代表可以联网；GameNetDriver 定义缺失时必须阻止按钮继续执行。
+	Inputs.bHasNetDriverDefinition = true;
+	Inputs.bHasNetDriverClass = true;
+	Inputs.bHasConflictingActiveNetDriver = true;
+	TestEqual(
+		TEXT("活动驱动属于另一个 Provider 时拒绝切换"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::ActiveNetDriverConflict);
+
+	Inputs.bHasConflictingActiveNetDriver = false;
+	Inputs.bHasNetDriverDefinition = false;
+	TestEqual(
+		TEXT("缺少 GameNetDriver Definition 时返回明确状态"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::NetDriverDefinitionUnavailable);
+
+	// 这正是本次日志暴露的问题：Steam 子系统可用，但目标 Steam 驱动类不能加载。
+	Inputs.bHasNetDriverDefinition = true;
+	Inputs.bHasNetDriverClass = false;
+	TestEqual(
+		TEXT("Steam NetDriver 类不可加载时不能误报 Ready"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::NetDriverClassUnavailable);
+
+	Inputs.bHasNetDriverClass = true;
+	TestEqual(
+		TEXT("NetDriver 与 Provider 依赖全部存在时才返回 Ready"),
 		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
 		EFU_OnlineProviderStatusCode::Ready);
 

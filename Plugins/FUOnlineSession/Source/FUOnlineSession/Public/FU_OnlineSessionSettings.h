@@ -37,12 +37,7 @@ public:
     UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Online Session|Steam",meta = (ClampMin = "1", UIMin = "1"))
     int32 SteamDevAppId = 480;
 
-    /**
-     * true：使用 Steam 网络传输和 Steam NetDriver。
-     * false：Steam Lobby 只负责发现房间，实际连接使用 IP 网络。
-     *
-     * Editor 配置器会监听该属性；修改后会立即重建管理区块，并提示重启编辑器。
-     */
-    UPROPERTY(Config,EditAnywhere,Category = "Steam")
-    bool bUseSteamNetworking = true;
+    // 【FU 修复：移除旧式全局驱动开关】
+    // Steam 与 LAN 已由独立蓝图入口和 ProviderTraits 选择传输层：
+    // Steam 始终使用 SteamSockets，LAN 始终使用 IpNetDriver，不再让用户配置互相矛盾的组合。
 };

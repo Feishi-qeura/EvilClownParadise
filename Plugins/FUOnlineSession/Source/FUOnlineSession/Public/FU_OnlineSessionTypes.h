@@ -27,7 +27,10 @@ enum class EFU_JoinSessionResult : uint8
 	//未知错误
 	UnknownError,
 	//用户输入的房间密码不正确
-	InvalidPassword
+	InvalidPassword,
+
+	//目标 Provider 所需的 NetDriver 没有准备成功；此时不会启动 ClientTravel
+	NetDriverUnavailable
 
 };
 //扩展Steam和NULL在线提供方
@@ -65,7 +68,27 @@ enum class EFU_OnlineProviderStatusCode : uint8
 	IdentityInterfaceUnavailable UMETA(DisplayName = "Identity Interface Unavailable"),
 
 	//Steam Identity存在，但本地用户0当前没有登录Steam
-	NotLoggedIn UMETA(DisplayName = "Not Logged In")
+	NotLoggedIn UMETA(DisplayName = "Not Logged In"),
+
+	//引擎配置中没有名为 GameNetDriver 的定义，无法决定地图连接使用哪一种驱动
+	NetDriverDefinitionUnavailable UMETA(DisplayName = "NetDriver Definition Unavailable"),
+
+	//Provider 要求的驱动类没有加载；Steam 最常见原因是 SteamSockets 插件没有启用
+	NetDriverClassUnavailable UMETA(DisplayName = "NetDriver Class Unavailable"),
+
+	//当前 World 已经使用另一种驱动联网，必须先退出该网络世界才能切换 Provider
+	ActiveNetDriverConflict UMETA(DisplayName = "Active NetDriver Conflict")
+};
+
+/**
+ * Session 加入成功以后仍可能在 ClientTravel 阶段失败。
+ * 该枚举让蓝图区分“网络连接失败”和“地图旅行失败”。
+ */
+UENUM(BlueprintType)
+enum class EFU_OnlineConnectionFailureType : uint8
+{
+	NetworkFailure UMETA(DisplayName = "Network Failure"),
+	TravelFailure UMETA(DisplayName = "Travel Failure")
 };
 
 /**
@@ -109,6 +132,22 @@ struct FUONLINESESSION_API FFU_OnlineProviderStatus
 	//只有Steam检查会读取登录状态；LAN不依赖平台账号
 	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
 	bool bLoggedIn = false;
+
+	//当前 Provider 真正需要的传输驱动；Steam 与 LAN 的值不同。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	FName RequiredNetDriverClass = NAME_None;
+
+	//引擎中是否存在 GameNetDriver 定义。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bNetDriverDefinitionAvailable = false;
+
+	//RequiredNetDriverClass 当前是否已经注册并能够被引擎加载。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bNetDriverClassAvailable = false;
+
+	//当前 World 已经存在活动驱动时记录其真实类名，便于判断是否需要先退出联网关卡。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	FName ActiveNetDriverClass = NAME_None;
 
 	//面向玩家或开发者的可读说明；正式项目可以根据StatusCode换成本地化文本
 	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
@@ -158,3 +197,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FFU_OnFindSessionCompleteV2, EFU_
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FFU_OnJoinSessionCompleteV2, EFU_OnlineProvider, Provider, EFU_JoinSessionResult, Result);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FFU_OnDestroySessionComplete, EFU_OnlineProvider, Provider, bool, bWasSuccessful);
+
+//【FU 修复：旅行阶段错误】JoinSession Success 之后的网络/地图错误通过独立事件返回蓝图。
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+	FFU_OnOnlineConnectionFailure,
+	EFU_OnlineProvider, Provider,
+	EFU_OnlineConnectionFailureType, FailureType,
+	const FString&, Message);

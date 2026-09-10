@@ -16,6 +16,11 @@ struct FFU_OnlineProviderStatusInputs
 	bool bHasSessionInterface = false;
 	bool bHasIdentityInterface = false;
 	bool bIsLoggedIn = false;
+
+	//【FU 修复：NetDriver 状态层】OnlineSubsystem 可用并不代表地图连接驱动也可用
+	bool bHasNetDriverDefinition = false;
+	bool bHasNetDriverClass = false;
+	bool bHasConflictingActiveNetDriver = false;
 };
 
 /** 只负责状态分类，不保存数据，也不会调用任何异步 OnlineSubsystem 操作。 */
@@ -40,6 +45,24 @@ public:
 		if (!Inputs.bHasSessionInterface)
 		{
 			return EFU_OnlineProviderStatusCode::SessionInterfaceUnavailable;
+		}
+
+		// Session Interface 只负责会话操作；没有 GameNetDriver 时无法 Listen 或 ClientTravel。
+		if (!Inputs.bHasNetDriverDefinition)
+		{
+			return EFU_OnlineProviderStatusCode::NetDriverDefinitionUnavailable;
+		}
+
+		// 目标驱动类不可用时必须提前失败，不能让引擎静默回退后再解析错误地址。
+		if (!Inputs.bHasNetDriverClass)
+		{
+			return EFU_OnlineProviderStatusCode::NetDriverClassUnavailable;
+		}
+
+		// NetDriver 属于当前网络世界；正在使用另一种驱动时不能热切换 Provider。
+		if (Inputs.bHasConflictingActiveNetDriver)
+		{
+			return EFU_OnlineProviderStatusCode::ActiveNetDriverConflict;
 		}
 
 		// NULL/LAN 只依赖 Session Interface，不需要平台账号身份。

@@ -18,19 +18,19 @@ namespace FUOnlineSessionConfig
 
 EFU_ExternalGameNetDriverState
 FFUOnlineSessionConfigManager::AnalyzeExternalGameNetDriver(
-    const FString& ExternalConfigContent,
-    const bool bUseSteamNetworking
+    const FString& ExternalConfigContent
 )
 {
-    // 参数描述插件接下来将生成哪种驱动。当前两种内置驱动都属于插件支持范围，
-    // 因为用户切换设置时，旧定义会被新管理区块中的 ClearArray 安全替换。
-    const TCHAR* ExpectedDriverName = bUseSteamNetworking
-        ? TEXT("OnlineSubsystemSteam.SteamNetDriver")
-        : TEXT("OnlineSubsystemUtils.IpNetDriver");
-
-    const TCHAR* OtherSupportedDriverName = bUseSteamNetworking
-        ? TEXT("OnlineSubsystemUtils.IpNetDriver")
-        : TEXT("OnlineSubsystemSteam.SteamNetDriver");
+    // 【FU 修复：旧配置迁移】参数仍保留以兼容已有调用接口。
+    // 无论当前默认选择 Steam 还是 IP，下列驱动都属于插件认识且能够迁移的历史配置。
+    // 其中 OnlineSubsystemSteam.SteamNetDriver 是旧文档路径，只允许识别和迁移，绝不再生成。
+    static const TCHAR* SupportedDriverNames[] =
+    {
+        TEXT("SteamSockets.SteamSocketsNetDriver"),
+        TEXT("SocketSubsystemSteamIP.SteamNetDriver"),
+        TEXT("OnlineSubsystemSteam.SteamNetDriver"),
+        TEXT("OnlineSubsystemUtils.IpNetDriver")
+    };
 
     TArray<FString> Lines;
     ExternalConfigContent.ParseIntoArrayLines(Lines, false);
@@ -75,15 +75,15 @@ FFUOnlineSessionConfigManager::AnalyzeExternalGameNetDriver(
         }
 
         // 同时兼容带 /Script/ 的现代写法以及 UE 旧项目常见的不带前缀写法。
-        const bool bUsesSupportedDriver =
-            PrimaryDriverDefinition.Contains(
-                ExpectedDriverName,
-                ESearchCase::IgnoreCase
-            )
-            || PrimaryDriverDefinition.Contains(
-                OtherSupportedDriverName,
-                ESearchCase::IgnoreCase
-            );
+        bool bUsesSupportedDriver = false;
+        for (const TCHAR* SupportedDriverName : SupportedDriverNames)
+        {
+            if (PrimaryDriverDefinition.Contains(SupportedDriverName, ESearchCase::IgnoreCase))
+            {
+                bUsesSupportedDriver = true;
+                break;
+            }
+        }
 
         if (!bUsesSupportedDriver)
         {
@@ -127,12 +127,9 @@ FString FFUOnlineSessionConfigManager::BuildManagedConfigBlock(
         Settings.SteamDevAppId
     ));
 
-    AddLine(FString::Printf(
-        TEXT("bUseSteamNetworking=%s"),
-        Settings.bUseSteamNetworking
-            ? TEXT("true")
-            : TEXT("false")
-    ));
+    // 【FU 修复：双 Provider 固定职责】Steam Lobby 必须保留 Steam 网络传输；
+    // LAN 入口会在 Runtime 模板中切换到 IpNetDriver，不需要关闭全局 Steam 能力。
+    AddLine(TEXT("bUseSteamNetworking=true"));
 
     AddLine(TEXT(""));
 
@@ -142,30 +139,17 @@ FString FFUOnlineSessionConfigManager::BuildManagedConfigBlock(
     // 避免 ClearArray 破坏引擎的录像驱动配置。
     AddLine(TEXT("!NetDriverDefinitions=ClearArray"));
 
-    if (Settings.bUseSteamNetworking)
-    {
-        AddLine(
-            TEXT(
-                "+NetDriverDefinitions="
-                "(DefName=\"GameNetDriver\","
-                "DriverClassName=\"/Script/OnlineSubsystemSteam.SteamNetDriver\","
-                "DriverClassNameFallback=\"/Script/OnlineSubsystemUtils.IpNetDriver\")"
-            )
-        );
-    }
-    else
-    {
-        // 关闭 Steam Networking 时，Steam Lobby 仍负责发现房间，
-        // 但游戏连接改为普通 IP 网络。
-        AddLine(
-            TEXT(
-                "+NetDriverDefinitions="
-                "(DefName=\"GameNetDriver\","
-                "DriverClassName=\"/Script/OnlineSubsystemUtils.IpNetDriver\","
-                "DriverClassNameFallback=\"/Script/OnlineSubsystemUtils.IpNetDriver\")"
-            )
-        );
-    }
+    // 【FU 修复：SteamSockets】UE 5.8 的现代 Steam P2P 传输使用独立 SteamSocketsNetDriver。
+    // 旧 /Script/OnlineSubsystemSteam.SteamNetDriver 在本引擎版本中无法加载，
+    // 加载失败后会回退到 IpNetDriver，进而把 steam.<SteamId> 错当成 DNS 主机名。
+    AddLine(
+        TEXT(
+            "+NetDriverDefinitions="
+            "(DefName=\"GameNetDriver\","
+            "DriverClassName=\"/Script/SteamSockets.SteamSocketsNetDriver\","
+            "DriverClassNameFallback=\"/Script/OnlineSubsystemUtils.IpNetDriver\")"
+        )
+    );
 
     AddLine(
         TEXT(
@@ -176,22 +160,19 @@ FString FFUOnlineSessionConfigManager::BuildManagedConfigBlock(
         )
     );
 
-    if (Settings.bUseSteamNetworking)
-    {
-        AddLine(TEXT(""));
-        AddLine(
-            TEXT(
-                "[/Script/OnlineSubsystemSteam.SteamNetDriver]"
-            )
-        );
+    AddLine(TEXT(""));
+    AddLine(
+        TEXT(
+            "[/Script/SteamSockets.SteamSocketsNetDriver]"
+        )
+    );
 
-        AddLine(
-            TEXT(
-                "NetConnectionClassName="
-                "\"/Script/OnlineSubsystemSteam.SteamNetConnection\""
-            )
-        );
-    }
+    AddLine(
+        TEXT(
+            "NetConnectionClassName="
+            "\"/Script/SteamSockets.SteamSocketsNetConnection\""
+        )
+    );
 
     AddLine(TEXT(""));
     AddLine(FUOnlineSessionConfig::EndMarker);
@@ -272,18 +253,9 @@ FFUOnlineSessionConfigManager::WriteManagedConfigBlock(
     }
 
     // 移除插件自己的区块后，剩余 GameNetDriver 才是项目或其他插件拥有的配置。
-    const UFU_OnlineSessionSettings* CurrentSettings =
-        GetDefault<UFU_OnlineSessionSettings>();
-
-    if (!CurrentSettings)
-    {
-        return EFU_OnlineConfigResult::Failed;
-    }
-
     const EFU_ExternalGameNetDriverState ExternalDriverState =
         AnalyzeExternalGameNetDriver(
-            ExistingContent,
-            CurrentSettings->bUseSteamNetworking
+            ExistingContent
         );
 
     if (ExternalDriverState == EFU_ExternalGameNetDriverState::Conflict)

@@ -55,15 +55,19 @@ public:
      * 函数不读写磁盘，放在 Editor 私有模块中公开是为了让自动化测试直接验证规则。
      */
     static EFU_ExternalGameNetDriverState AnalyzeExternalGameNetDriver(
-        const FString& ExternalConfigContent,
-        bool bUseSteamNetworking
+        const FString& ExternalConfigContent
     );
 
-private:
+    /**
+     * 【FU 修复：可测试的配置生成】
+     * 将设置转换成完整的受管 ini 区块；函数本身不读写磁盘。
+     * 公开这个纯转换接口，可以让自动化测试直接阻止旧 SteamNetDriver 路径回归。
+     */
     static FString BuildManagedConfigBlock(
         const UFU_OnlineSessionSettings& Settings
     );
 
+private:
     static EFU_OnlineConfigResult WriteManagedConfigBlock(
         const FString& ManagedBlock
     );
