@@ -184,6 +184,48 @@ public:
 };
 
 /**
+ * 【A1 reviewer：同步重入副作用缝】内部恢复 outcome 的所有后置动作都由 production dispatcher 编排。
+ * LegacyCompletion/Travel 故意作为显式 sink 暴露给测试与调用点，但内部恢复策略永远不调用它们；
+ * 这样测试断言的 0 是真实连接后的 0，而不是脱离生产代码的局部常量。
+ */
+struct FFU_OnlineOperationPathDispatchSinks
+{
+	TFunction<void(const FFU_OnlineDiagnosticEvent&)> Diagnostic;
+	TFunction<uint64()> CurrentGeneration;
+	TFunction<bool()> SharedResourcesStillMatch;
+	TFunction<void()> ExactOldResourceCleanup;
+	TFunction<void()> GenerationMatchedCleanup;
+	TFunction<void()> RecoveryDestroySubmission;
+	TFunction<void()> LegacyCompletion;
+	TFunction<void()> Travel;
+};
+
+/** 可测试的执行计划结果；false 的 legacy/travel 标志证明它们被策略显式抑制，而非漏接计数器。 */
+struct FFU_OnlineOperationPathDispatchResult
+{
+	bool bDiagnostic = false;
+	bool bExactOldResourceCleanup = false;
+	bool bGenerationMatchedCleanup = false;
+	bool bRecoveryDestroySubmission = false;
+	bool bLegacyCompletion = false;
+	bool bTravel = false;
+};
+
+class FFU_OnlineOperationPathDispatcher final
+{
+public:
+	/**
+	 * 顺序固定为 Diagnostic -> 旧资源精确清理 -> generation 仍匹配时的共享字段清理 -> 可选恢复 Destroy。
+	 * 未设置事件、无效根 ID 或 generation=0 均视为真正 stale，所有 sink 保持零调用。
+	 */
+	static FFU_OnlineOperationPathDispatchResult DispatchInternal(
+		const TOptional<FFU_OnlineDiagnosticEvent>& Event,
+		uint64 CompletedGeneration,
+		bool bRequestRecoveryDestroy,
+		const FFU_OnlineOperationPathDispatchSinks& Sinks);
+};
+
+/**
  * 无 UObject 的预检 gate：生产模板与自动化测试必须共用它，保证诊断 sink 一定早于旧失败续步。
  */
 class FFU_OnlineProviderPreflightGate final

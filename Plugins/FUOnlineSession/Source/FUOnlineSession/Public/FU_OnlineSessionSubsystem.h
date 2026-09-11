@@ -18,6 +18,7 @@ class FFU_OnlineSessionDiagnostics;
 class FFU_OnlineOperationStateMachine;
 struct FFU_OperationTicket;
 enum class EFU_OperationKind : uint8;
+enum class EFU_OperationAction : uint16;
 enum class EFU_NetDriverLeaseResult : uint8;
 
 /**
@@ -245,6 +246,22 @@ private:
 		TUniquePtr<FFU_OnlineOperationStateMachine, FFU_OnlineOperationStateMachineDeleter> OperationMachine;
 	};
 
+	/**
+	 * 【诊断同步重入保护】回调进入时先复制本 generation 真正注册的接口、Handle 与搜索对象。
+	 * 诊断 Blueprint 若同步启动新 generation，旧回调仍可从原接口解绑旧 Handle，却不能 reset 新字段。
+	 */
+	struct FFU_OnlineCallbackResourceSnapshot
+	{
+		IOnlineSessionPtr SessionInterface;
+		TSharedPtr<FOnlineSessionSearch> SessionSearch;
+		FDelegateHandle CreateDelegateHandle;
+		FDelegateHandle FindDelegateHandle;
+		FDelegateHandle JoinDelegateHandle;
+		FDelegateHandle DestroyDelegateHandle;
+		FDelegateHandle CancelFindDelegateHandle;
+		FTimerHandle OperationWatchdogHandle;
+	};
+
 	//Steam与NULL的接口、搜索结果和委托必须独立保存，不能复用旧的单状态字段，2个实例对象
 	FFU_OnlineProviderState SteamState;
 	FFU_OnlineProviderState LanState;
@@ -425,6 +442,30 @@ private:
 
 	template<EFU_OnlineProvider Provider>
 	void FU_ClearFindCancellationDelegate();
+
+	/** 捕获状态机 decision 之前属于当前 generation 的资源身份，供同步诊断后的精确清理使用。 */
+	template<EFU_OnlineProvider Provider>
+	FFU_OnlineCallbackResourceSnapshot FU_CaptureCallbackResources() const;
+
+	/** 只从捕获的原 SessionInterface 解绑旧 Handle/Timer，不触碰 ProviderState 的共享字段。 */
+	void FU_ClearCapturedCallbackResources(
+		const FFU_OnlineCallbackResourceSnapshot& Snapshot,
+		EFU_OperationKind SubmittedKind,
+		EFU_OperationAction Actions);
+
+	/** generation 未变时还要核对接口、相关 Handle 与 Search 指针，防止同 generation 的资源替换。 */
+	template<EFU_OnlineProvider Provider>
+	bool FU_AreCapturedCallbackResourcesCurrent(
+		const FFU_OnlineCallbackResourceSnapshot& Snapshot,
+		EFU_OperationKind SubmittedKind,
+		EFU_OperationAction Actions) const;
+
+	/** generation gate 通过后，仍需资源身份相等才 reset 共享字段与 pending 数据。 */
+	template<EFU_OnlineProvider Provider>
+	void FU_ResetMatchedCallbackResources(
+		const FFU_OnlineCallbackResourceSnapshot& Snapshot,
+		EFU_OperationKind SubmittedKind,
+		EFU_OperationAction Actions);
 
 	/** Find watchdog 触发后的唯一取消入口；取消失败仍保留原 Find completion 作为终点。 */
 	template<EFU_OnlineProvider Provider>

@@ -686,6 +686,65 @@ FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestr
 	return Event;
 }
 
+FFU_OnlineOperationPathDispatchResult FFU_OnlineOperationPathDispatcher::DispatchInternal(
+	const TOptional<FFU_OnlineDiagnosticEvent>& Event,
+	const uint64 CompletedGeneration,
+	const bool bRequestRecoveryDestroy,
+	const FFU_OnlineOperationPathDispatchSinks& Sinks)
+{
+	FFU_OnlineOperationPathDispatchResult Result;
+	// 【stale 安全】没有经过状态机验证并携带根 ID 的事件不得触发任何可观测或清理动作。
+	if (!Event.IsSet() || !Event->OperationId.IsValid() || CompletedGeneration == 0)
+	{
+		return Result;
+	}
+
+	// 诊断必须先看到状态机已经作出的决定；它可以同步触发 Blueprint 并启动下一 generation。
+	if (Sinks.Diagnostic)
+	{
+		Sinks.Diagnostic(Event.GetValue());
+		Result.bDiagnostic = true;
+	}
+
+	// 即使发生重入，也必须通过预先捕获的接口/Handle 清掉旧注册，不能把旧回调永久留在 OSS。
+	if (Sinks.ExactOldResourceCleanup)
+	{
+		Sinks.ExactOldResourceCleanup();
+		Result.bExactOldResourceCleanup = true;
+	}
+
+	// 共享字段和恢复续步只能属于仍然活跃的已完成 generation；同步重入换代后必须立即止步。
+	if (!Sinks.CurrentGeneration
+		|| Sinks.CurrentGeneration() != CompletedGeneration
+		|| !Sinks.SharedResourcesStillMatch
+		|| !Sinks.SharedResourcesStillMatch())
+	{
+		return Result;
+	}
+	if (Sinks.GenerationMatchedCleanup)
+	{
+		Sinks.GenerationMatchedCleanup();
+		Result.bGenerationMatchedCleanup = true;
+	}
+	if (bRequestRecoveryDestroy && Sinks.RecoveryDestroySubmission)
+	{
+		Sinks.RecoveryDestroySubmission();
+		Result.bRecoveryDestroySubmission = true;
+	}
+
+	// LegacyCompletion 与 Travel 是刻意接入但被执行计划固定禁止的 sink：内部恢复只能收敛。
+	// 保留显式分支与 Result flag，使测试能证明两个 production sink 已连接且策略选择“不调用”。
+	if (Result.bLegacyCompletion && Sinks.LegacyCompletion)
+	{
+		Sinks.LegacyCompletion();
+	}
+	if (Result.bTravel && Sinks.Travel)
+	{
+		Sinks.Travel();
+	}
+	return Result;
+}
+
 FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
 	const EFU_OnlineProvider Provider,
 	const EFU_OnlineDiagnosticOperation Operation,

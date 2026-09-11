@@ -311,6 +311,195 @@ void UFU_OnlineSessionSubsystem::FU_ClearFindCancellationDelegate()
 }
 
 template<EFU_OnlineProvider Provider>
+UFU_OnlineSessionSubsystem::FFU_OnlineCallbackResourceSnapshot
+UFU_OnlineSessionSubsystem::FU_CaptureCallbackResources() const
+{
+	const FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
+	FFU_OnlineCallbackResourceSnapshot Snapshot;
+	Snapshot.SessionInterface = State.SessionInterface;
+	Snapshot.SessionSearch = State.SessionSearch;
+	Snapshot.CreateDelegateHandle = State.CreateDelegateHandle;
+	Snapshot.FindDelegateHandle = State.FindDelegateHandle;
+	Snapshot.JoinDelegateHandle = State.JoinDelegateHandle;
+	Snapshot.DestroyDelegateHandle = State.DestroyDelegateHandle;
+	Snapshot.CancelFindDelegateHandle = State.CancelFindDelegateHandle;
+	Snapshot.OperationWatchdogHandle = State.OperationWatchdogHandle;
+	return Snapshot;
+}
+
+void UFU_OnlineSessionSubsystem::FU_ClearCapturedCallbackResources(
+	const FFU_OnlineCallbackResourceSnapshot& Snapshot,
+	const EFU_OperationKind SubmittedKind,
+	const EFU_OperationAction Actions)
+{
+	// TimerManager 以 Handle 的值定位 timer；传入局部副本可清旧 timer，又不会使新共享 Handle 失效。
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog)
+		&& Snapshot.OperationWatchdogHandle.IsValid())
+	{
+		if (UGameInstance* const GameInstance = GetGameInstance())
+		{
+			FTimerHandle CapturedWatchdog = Snapshot.OperationWatchdogHandle;
+			GameInstance->GetTimerManager().ClearTimer(CapturedWatchdog);
+		}
+	}
+
+	if (Snapshot.SessionInterface.IsValid()
+		&& EnumHasAnyFlags(Actions, EFU_OperationAction::ClearOriginalDelegate))
+	{
+		// 每个 Handle 只能交回注册它的旧接口，不能借用诊断重入后替换的新接口。
+		switch (SubmittedKind)
+		{
+		case EFU_OperationKind::Create:
+			if (Snapshot.CreateDelegateHandle.IsValid())
+			{
+				FDelegateHandle CapturedHandle = Snapshot.CreateDelegateHandle;
+				Snapshot.SessionInterface->ClearOnCreateSessionCompleteDelegate_Handle(CapturedHandle);
+			}
+			break;
+		case EFU_OperationKind::Find:
+			if (Snapshot.FindDelegateHandle.IsValid())
+			{
+				FDelegateHandle CapturedHandle = Snapshot.FindDelegateHandle;
+				Snapshot.SessionInterface->ClearOnFindSessionsCompleteDelegate_Handle(CapturedHandle);
+			}
+			break;
+		case EFU_OperationKind::Join:
+			if (Snapshot.JoinDelegateHandle.IsValid())
+			{
+				FDelegateHandle CapturedHandle = Snapshot.JoinDelegateHandle;
+				Snapshot.SessionInterface->ClearOnJoinSessionCompleteDelegate_Handle(CapturedHandle);
+			}
+			break;
+		case EFU_OperationKind::Destroy:
+			if (Snapshot.DestroyDelegateHandle.IsValid())
+			{
+				FDelegateHandle CapturedHandle = Snapshot.DestroyDelegateHandle;
+				Snapshot.SessionInterface->ClearOnDestroySessionCompleteDelegate_Handle(CapturedHandle);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (Snapshot.SessionInterface.IsValid()
+		&& Snapshot.CancelFindDelegateHandle.IsValid()
+		&& EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate))
+	{
+		FDelegateHandle CapturedHandle = Snapshot.CancelFindDelegateHandle;
+		Snapshot.SessionInterface->ClearOnCancelFindSessionsCompleteDelegate_Handle(
+			CapturedHandle);
+	}
+}
+
+template<EFU_OnlineProvider Provider>
+bool UFU_OnlineSessionSubsystem::FU_AreCapturedCallbackResourcesCurrent(
+	const FFU_OnlineCallbackResourceSnapshot& Snapshot,
+	const EFU_OperationKind SubmittedKind,
+	const EFU_OperationAction Actions) const
+{
+	const FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
+	if (State.SessionInterface.Get() != Snapshot.SessionInterface.Get())
+	{
+		return false;
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog)
+		&& State.OperationWatchdogHandle != Snapshot.OperationWatchdogHandle)
+	{
+		return false;
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate)
+		&& State.CancelFindDelegateHandle != Snapshot.CancelFindDelegateHandle)
+	{
+		return false;
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearOriginalDelegate))
+	{
+		const bool bOriginalHandleMatches =
+			(SubmittedKind == EFU_OperationKind::Create && State.CreateDelegateHandle == Snapshot.CreateDelegateHandle)
+			|| (SubmittedKind == EFU_OperationKind::Find && State.FindDelegateHandle == Snapshot.FindDelegateHandle)
+			|| (SubmittedKind == EFU_OperationKind::Join && State.JoinDelegateHandle == Snapshot.JoinDelegateHandle)
+			|| (SubmittedKind == EFU_OperationKind::Destroy && State.DestroyDelegateHandle == Snapshot.DestroyDelegateHandle);
+		if (!bOriginalHandleMatches)
+		{
+			return false;
+		}
+	}
+	return !EnumHasAnyFlags(Actions, EFU_OperationAction::ClearPendingData)
+		|| SubmittedKind != EFU_OperationKind::Find
+		|| State.SessionSearch == Snapshot.SessionSearch;
+}
+
+template<EFU_OnlineProvider Provider>
+void UFU_OnlineSessionSubsystem::FU_ResetMatchedCallbackResources(
+	const FFU_OnlineCallbackResourceSnapshot& Snapshot,
+	const EFU_OperationKind SubmittedKind,
+	const EFU_OperationAction Actions)
+{
+	FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
+	// generation 相等仍不足以证明资源相同；每个字段都要与进入回调时的快照做身份匹配。
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog)
+		&& State.OperationWatchdogHandle == Snapshot.OperationWatchdogHandle)
+	{
+		State.OperationWatchdogHandle.Invalidate();
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearOriginalDelegate))
+	{
+		switch (SubmittedKind)
+		{
+		case EFU_OperationKind::Create:
+			if (State.CreateDelegateHandle == Snapshot.CreateDelegateHandle) { State.CreateDelegateHandle.Reset(); }
+			break;
+		case EFU_OperationKind::Find:
+			if (State.FindDelegateHandle == Snapshot.FindDelegateHandle) { State.FindDelegateHandle.Reset(); }
+			break;
+		case EFU_OperationKind::Join:
+			if (State.JoinDelegateHandle == Snapshot.JoinDelegateHandle) { State.JoinDelegateHandle.Reset(); }
+			break;
+		case EFU_OperationKind::Destroy:
+			if (State.DestroyDelegateHandle == Snapshot.DestroyDelegateHandle) { State.DestroyDelegateHandle.Reset(); }
+			break;
+		default:
+			break;
+		}
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate)
+		&& State.CancelFindDelegateHandle == Snapshot.CancelFindDelegateHandle)
+	{
+		State.CancelFindDelegateHandle.Reset();
+	}
+
+	if (!EnumHasAnyFlags(Actions, EFU_OperationAction::ClearPendingData))
+	{
+		return;
+	}
+	// pending 标量没有独立 identity，由 dispatcher 的 generation gate 保护；搜索对象还要额外比较指针身份。
+	switch (SubmittedKind)
+	{
+	case EFU_OperationKind::Create:
+		State.PendingCreateRoomName.Reset();
+		State.PendingCreateRoomPassword.Reset();
+		State.PendingMaxPlayers = 0;
+		break;
+	case EFU_OperationKind::Find:
+		if (State.SessionSearch == Snapshot.SessionSearch)
+		{
+			State.SessionSearch.Reset();
+			State.PendingFindRoomName.Reset();
+		}
+		break;
+	case EFU_OperationKind::Join:
+		State.PendingJoinResult.Reset();
+		break;
+	case EFU_OperationKind::Destroy:
+		State.PendingOperation = EFU_PendingOperation::None;
+		break;
+	default:
+		break;
+	}
+}
+
+template<EFU_OnlineProvider Provider>
 void UFU_OnlineSessionSubsystem::FU_BroadcastOperationFailure(const EFU_OperationKind RootKind)
 {
 	// 根操作决定 Blueprint 完成事件；预销毁的 SubmittedKind=Destroy 不能误播 Destroy 完成。
@@ -1009,6 +1198,7 @@ void UFU_OnlineSessionSubsystem::FU_OnRecoveryDestroyComplete(
 	const bool bSessionStillExists = State.SessionInterface.IsValid()
 		&& State.SessionInterface->GetNamedSession(NAME_GameSession) != nullptr;
 	const bool bDestroyReachedNoSession = bWasSuccessful && !bSessionStillExists;
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	// 【A2 stale gate】必须让状态机同时验证 SessionName、generation、kind、phase 后再取 ID；
 	// 真正 stale 的回调得到 None 并保持无事件、无清理，不能借用当前新操作身份。
 	const EFU_OperationAction Actions = SessionName == NAME_GameSession
@@ -1024,36 +1214,45 @@ void UFU_OnlineSessionSubsystem::FU_OnRecoveryDestroyComplete(
 	}
 
 	const FGuid OperationId = Machine.Get().ActiveOperationId;
-	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+	const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
 		Provider,
 		OperationId,
 		bDestroyReachedNoSession
 			? EFU_RecoveryDestroyDiagnosticOutcome::CallbackSucceeded
 			: EFU_RecoveryDestroyDiagnosticOutcome::CallbackFailed,
 		bSessionStillExists,
-		Actions));
-
-	// 状态机 action 是清理唯一真相；诊断已同步发出后才可触碰对应 generation 的资源。
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
+		Actions);
+	FFU_OnlineOperationPathDispatchSinks Sinks;
+	Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
 	{
-		FU_ClearOperationWatchdog<Provider>();
-	}
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearOriginalDelegate))
+		FU_EmitDiagnostic<Provider>(InEvent);
+	};
+	Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+	Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, Actions]()
 	{
-		FU_ClearDestroyDelegate<Provider>();
-	}
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearPendingData))
+		return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Destroy, Actions);
+	};
+	Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, Actions]()
 	{
-		State.PendingOperation = EFU_PendingOperation::None;
-	}
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease))
+		FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Destroy, Actions);
+	};
+	Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, Actions]()
 	{
-		if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() == Provider)
+		FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Destroy, Actions);
+		if (EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease))
 		{
-			ActiveGameplayProvider.Reset();
+			if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() == Provider)
+			{
+				ActiveGameplayProvider.Reset();
+			}
+			FU_RequestNetDriverLeaseRelease(Provider, TEXT("Recovery Destroy reached terminal NoSession"));
 		}
-		FU_RequestNetDriverLeaseRelease(Provider, TEXT("Recovery Destroy reached terminal NoSession"));
-	}
+	};
+	Sinks.LegacyCompletion = [this, &Machine]()
+	{
+		FU_BroadcastOperationFailure<Provider>(Machine.Get().RootKind);
+	};
+	FFU_OnlineOperationPathDispatcher::DispatchInternal(Event, Generation, false, Sinks);
 }
 
 //销毁完成后回调
@@ -1369,6 +1568,8 @@ void UFU_OnlineSessionSubsystem::FU_OnCreateSessionComplete(
 		&& State.SessionInterface->GetNamedSession(NAME_GameSession) != nullptr;
 	const bool bOverallSucceeded = bWasSuccessful && bSessionStillExists;
 	const FGuid OperationId = Machine.Get().ActiveOperationId;
+	// 必须在状态 decision 与同步诊断之前捕获，否则 Blueprint 重入安装的新 Handle 会被误认为旧资源。
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	const EFU_OperationAction Actions = Machine.HandleOriginalCompletion(
 		Generation,
 		EFU_OperationKind::Create,
@@ -1376,14 +1577,46 @@ void UFU_OnlineSessionSubsystem::FU_OnCreateSessionComplete(
 		bSessionStillExists);
 	if (bWasRecovering)
 	{
-		// 【A1 时序】状态机先决定是否请求补偿 Destroy；诊断同步公开同一原 OperationId 后，
-		// 才允许清 delegate/pending 或执行恢复 action。Blueprint 重入因此只能看到已转换状态。
-		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+		const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
 			Provider,
 			EFU_OnlineDiagnosticOperation::CreateSession,
 			OperationId,
 			bOverallSucceeded,
-			Actions));
+			Actions);
+		FFU_OnlineOperationPathDispatchSinks Sinks;
+		Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
+		{
+			FU_EmitDiagnostic<Provider>(InEvent);
+		};
+		Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+		Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, Actions]()
+		{
+			return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Create, Actions);
+		};
+		Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Create, Actions);
+		};
+		Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Create, Actions);
+			if (EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease))
+			{
+				FU_RequestNetDriverLeaseRelease(Provider, TEXT("CreateSession late callback reached NoSession"));
+			}
+		};
+		Sinks.RecoveryDestroySubmission = [this]() { FU_BeginRecoveryDestroy<Provider>(false); };
+		// 真实旧完成 sink 被显式交给策略，但内部 dispatcher 永不调用；测试会观测其计数始终为 0。
+		Sinks.LegacyCompletion = [this, bOverallSucceeded]()
+		{
+			OnCreateSessionCompleteV2.Broadcast(Provider, bOverallSucceeded);
+		};
+		FFU_OnlineOperationPathDispatcher::DispatchInternal(
+			Event,
+			Generation,
+			EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy),
+			Sinks);
+		return;
 	}
 
 	FU_ClearOperationWatchdog<Provider>();
@@ -1551,17 +1784,40 @@ void UFU_OnlineSessionSubsystem::FU_OnFindSessionsComplete(
 	}
 	const bool bWasRecovering = Machine.Get().Phase == EFU_OperationPhase::Recovering;
 	const FGuid OperationId = Machine.Get().ActiveOperationId;
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	const EFU_OperationAction Actions =
 		Machine.HandleOriginalCompletion(Generation, EFU_OperationKind::Find, bWasSuccessful, false);
 	if (bWasRecovering)
 	{
-		// 【A1 Find 竞态】Actions 中是否清 cancel delegate 是“原 Find 赢得竞争”的唯一事实；
-		// 必须在状态转换后先发诊断，再按同一 action 精确清 Handle 和 pending 数据。
-		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveringFindOriginal(
+		const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildRecoveringFindOriginal(
 			Provider,
 			OperationId,
 			bWasSuccessful,
-			Actions));
+			Actions);
+		FFU_OnlineOperationPathDispatchSinks Sinks;
+		Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
+		{
+			FU_EmitDiagnostic<Provider>(InEvent);
+		};
+		Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+		Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, Actions]()
+		{
+			return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+		};
+		Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+		};
+		Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+		};
+		Sinks.LegacyCompletion = [this]()
+		{
+			OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
+		};
+		FFU_OnlineOperationPathDispatcher::DispatchInternal(Event, Generation, false, Sinks);
+		return;
 	}
 
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
@@ -1576,14 +1832,6 @@ void UFU_OnlineSessionSubsystem::FU_OnFindSessionsComplete(
 	{
 		FU_ClearFindCancellationDelegate<Provider>();
 	}
-	if (bWasRecovering)
-	{
-		// watchdog 已经广播失败；迟到 Find 只负责终止并清理，结果不能作为新的成功再次交给蓝图。
-		State.SessionSearch.Reset();
-		State.PendingFindRoomName.Reset();
-		return;
-	}
-
     TArray<FFU_SessionResult> BlueprintResults;
     State.CachedSearchResults.Reset();
 
@@ -1962,6 +2210,7 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 		BlueprintResult = EFU_JoinSessionResult::UnknownError;
 	}
 	const FGuid OperationId = Machine.Get().ActiveOperationId;
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	const EFU_OperationAction Actions = Machine.HandleOriginalCompletion(
 		Generation,
 		EFU_OperationKind::Join,
@@ -1969,14 +2218,52 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 		bSessionStillExists);
 	if (bWasRecovering)
 	{
-		// 【A1 时序/安全】迟到 Join 即使解析出地址也只公开有限 outcome；状态机先转换，
-		// 诊断再同步发出，随后才清资源/启动补偿 Destroy，绝不 ClientTravel 或重复旧 completion。
-		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+		const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
 			Provider,
 			EFU_OnlineDiagnosticOperation::JoinSession,
 			OperationId,
 			bOverallSucceeded,
-			Actions));
+			Actions);
+		FFU_OnlineOperationPathDispatchSinks Sinks;
+		Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
+		{
+			FU_EmitDiagnostic<Provider>(InEvent);
+		};
+		Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+		Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, Actions]()
+		{
+			return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Join, Actions);
+		};
+		Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Join, Actions);
+		};
+		Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Join, Actions);
+			if (EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease))
+			{
+				FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession late callback reached NoSession"));
+			}
+		};
+		Sinks.RecoveryDestroySubmission = [this]() { FU_BeginRecoveryDestroy<Provider>(false); };
+		Sinks.LegacyCompletion = [this, BlueprintResult]()
+		{
+			OnJoinSessionCompleteV2.Broadcast(Provider, BlueprintResult);
+		};
+		Sinks.Travel = [PendingTravelController, PendingConnectString]()
+		{
+			if (PendingTravelController)
+			{
+				PendingTravelController->ClientTravel(PendingConnectString, ETravelType::TRAVEL_Absolute);
+			}
+		};
+		FFU_OnlineOperationPathDispatcher::DispatchInternal(
+			Event,
+			Generation,
+			EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy),
+			Sinks);
+		return;
 	}
 	FU_ClearOperationWatchdog<Provider>();
 	FU_ClearJoinDelegate<Provider>();
@@ -2018,6 +2305,7 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 	}
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy))
 	{
+		// Submitted Join 的后处理失败可在本回调内首次转入 Recovering；保留 Task 6 原有补偿续步。
 		FU_BeginRecoveryDestroy<Provider>(false);
 	}
 }
@@ -2078,20 +2366,40 @@ void UFU_OnlineSessionSubsystem::FU_BeginFindCancellation(const uint64 Generatio
 		return;
 	}
 
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	const EFU_OperationAction Actions = Machine.HandleFindCancellationCompletion(Generation, false);
 	if (Actions == EFU_OperationAction::None)
 	{
 		// 调用栈内若已有有效完成回调赢得竞争，其事件已经使用原 ID 发出；这里不错误关联新操作。
 		return;
 	}
-	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+	const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
 		Provider,
 		OperationId,
-		EFU_FindCancellationDiagnosticOutcome::SynchronousRejected));
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate))
+		EFU_FindCancellationDiagnosticOutcome::SynchronousRejected);
+	FFU_OnlineOperationPathDispatchSinks Sinks;
+	Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
 	{
-		FU_ClearFindCancellationDelegate<Provider>();
-	}
+		FU_EmitDiagnostic<Provider>(InEvent);
+	};
+	Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+	Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, Actions]()
+	{
+		return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+	};
+	Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, Actions]()
+	{
+		FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+	};
+	Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, Actions]()
+	{
+		FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+	};
+	Sinks.LegacyCompletion = [this]()
+	{
+		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
+	};
+	FFU_OnlineOperationPathDispatcher::DispatchInternal(Event, Generation, false, Sinks);
 }
 
 template<EFU_OnlineProvider Provider>
@@ -2107,6 +2415,7 @@ void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 		Snapshot.Phase == EFU_OperationPhase::Recovering
 		&& Snapshot.ActiveKind == EFU_OperationKind::Destroy
 		&& Snapshot.bAwaitingOriginalCompletion;
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	const EFU_OperationAction Actions = Machine.HandleTimeout(Generation);
 	if (Actions == EFU_OperationAction::None)
 	{
@@ -2114,18 +2423,33 @@ void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 	}
 	if (bRepeatedRecoveryDestroyTimeout)
 	{
-		// 根请求早已 exactly-once 失败；状态机只授权清 watchdog、保留原 Destroy delegate。
-		// 先用原 ID 发 Recovery 事件，再执行该精确清理，不得重复旧 completion 或自动重提 Destroy。
-		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+		const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
 			Provider,
 			OperationId,
 			EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout,
 			false,
-			Actions));
-		if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
+			Actions);
+		FFU_OnlineOperationPathDispatchSinks Sinks;
+		Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
 		{
-			FU_ClearOperationWatchdog<Provider>();
-		}
+			FU_EmitDiagnostic<Provider>(InEvent);
+		};
+		Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+		Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, Actions]()
+		{
+			return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Destroy, Actions);
+		};
+		Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Destroy, Actions);
+		};
+		Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, Actions]()
+		{
+			FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Destroy, Actions);
+		};
+		Sinks.RecoveryDestroySubmission = [this]() { FU_BeginRecoveryDestroy<Provider>(true); };
+		Sinks.LegacyCompletion = [this, RootKind]() { FU_BroadcastOperationFailure<Provider>(RootKind); };
+		FFU_OnlineOperationPathDispatcher::DispatchInternal(Event, Generation, false, Sinks);
 		return;
 	}
 
@@ -2169,41 +2493,48 @@ void UFU_OnlineSessionSubsystem::FU_OnCancelFindSessionsComplete(
 	const bool bWasSuccessful,
 	const uint64 Generation)
 {
-	FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
 	FFU_OnlineOperationStateMachine& Machine = FU_GetOperationMachine<Provider>();
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	const EFU_OperationAction Actions = Machine.HandleFindCancellationCompletion(Generation, bWasSuccessful);
+	FFU_OnlineOperationPathDispatchSinks Sinks;
+	Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
+	{
+		FU_EmitDiagnostic<Provider>(InEvent);
+	};
+	Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+	Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, Actions]()
+	{
+		return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+	};
+	Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, Actions]()
+	{
+		FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+	};
+	Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, Actions]()
+	{
+		FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Find, Actions);
+	};
+	Sinks.LegacyCompletion = [this]()
+	{
+		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
+	};
 	if (Actions == EFU_OperationAction::None)
 	{
+		// unset event 经过 production dispatcher；它必须连 diagnostic/cleanup/legacy/travel 全部保持 no-op。
+		FFU_OnlineOperationPathDispatcher::DispatchInternal(
+			TOptional<FFU_OnlineDiagnosticEvent>(), Generation, false, Sinks);
 		return;
 	}
 	// 【A1 stale 安全】OperationId 只在状态机已验证 generation/kind/phase 并返回有效 action 后读取；
 	// None 分支绝不借用当前新操作的 ActiveOperationId，也不清任何新 Handle。
 	const FGuid OperationId = Machine.Get().ActiveOperationId;
-	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+	const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
 		Provider,
 		OperationId,
 		bWasSuccessful
 			? EFU_FindCancellationDiagnosticOutcome::CancelWonRace
-			: EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal));
-
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate))
-	{
-		FU_ClearFindCancellationDelegate<Provider>();
-	}
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearOriginalDelegate))
-	{
-		FU_ClearFindDelegate<Provider>();
-	}
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
-	{
-		FU_ClearOperationWatchdog<Provider>();
-	}
-	if (bWasSuccessful)
-	{
-		// 成功取消与原 Find 回调任一都足以证明 terminal；此后才可释放搜索对象。
-		State.SessionSearch.Reset();
-		State.PendingFindRoomName.Reset();
-	}
+			: EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal);
+	FFU_OnlineOperationPathDispatcher::DispatchInternal(Event, Generation, false, Sinks);
 }
 
 template<EFU_OnlineProvider Provider>
@@ -2267,6 +2598,8 @@ bool UFU_OnlineSessionSubsystem::FU_BeginRecoveryDestroy(const bool bExplicitRet
 			&ThisClass::FU_OnRecoveryDestroyComplete<Provider>,
 			RecoveryGeneration));
 	FU_ArmOperationWatchdog<Provider>(RecoveryGeneration);
+	// OSS 调用可能同步回调并触发 Blueprint 重入；提交前锁定本次 delegate/timer/search 身份。
+	const FFU_OnlineCallbackResourceSnapshot ResourceSnapshot = FU_CaptureCallbackResources<Provider>();
 	const bool bStarted = State.SessionInterface->DestroySession(NAME_GameSession);
 	if (!bStarted && Machine.IsExpectedCallback(RecoveryGeneration, EFU_OperationKind::Destroy))
 	{
@@ -2281,28 +2614,40 @@ bool UFU_OnlineSessionSubsystem::FU_BeginRecoveryDestroy(const bool bExplicitRet
 			// 同步调用栈内若回调已经完成，它已通过专用回调发出可归因事件；这里不得重复关联。
 			return false;
 		}
-		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+		const FGuid OperationId = Machine.Get().ActiveOperationId;
+		const FFU_OnlineDiagnosticEvent Event = FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
 			Provider,
-			Machine.Get().ActiveOperationId,
+			OperationId,
 			EFU_RecoveryDestroyDiagnosticOutcome::SynchronousRejected,
 			bSessionStillExists,
-			RejectActions));
-		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::ClearWatchdog))
+			RejectActions);
+		FFU_OnlineOperationPathDispatchSinks Sinks;
+		Sinks.Diagnostic = [this](const FFU_OnlineDiagnosticEvent& InEvent)
 		{
-			FU_ClearOperationWatchdog<Provider>();
-		}
-		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::ClearOriginalDelegate))
+			FU_EmitDiagnostic<Provider>(InEvent);
+		};
+		Sinks.CurrentGeneration = [&Machine]() { return Machine.Get().ActiveGeneration; };
+		Sinks.SharedResourcesStillMatch = [this, ResourceSnapshot, RejectActions]()
 		{
-			FU_ClearDestroyDelegate<Provider>();
-		}
-		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::ClearPendingData))
+			return FU_AreCapturedCallbackResourcesCurrent<Provider>(ResourceSnapshot, EFU_OperationKind::Destroy, RejectActions);
+		};
+		Sinks.ExactOldResourceCleanup = [this, ResourceSnapshot, RejectActions]()
 		{
-			State.PendingOperation = EFU_PendingOperation::None;
-		}
-		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::RequestLeaseRelease))
+			FU_ClearCapturedCallbackResources(ResourceSnapshot, EFU_OperationKind::Destroy, RejectActions);
+		};
+		Sinks.GenerationMatchedCleanup = [this, ResourceSnapshot, RejectActions]()
 		{
-			FU_RequestNetDriverLeaseRelease(Provider, TEXT("Recovery Destroy rejected after reaching NoSession"));
-		}
+			FU_ResetMatchedCallbackResources<Provider>(ResourceSnapshot, EFU_OperationKind::Destroy, RejectActions);
+			if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::RequestLeaseRelease))
+			{
+				FU_RequestNetDriverLeaseRelease(Provider, TEXT("Recovery Destroy rejected after reaching NoSession"));
+			}
+		};
+		Sinks.LegacyCompletion = [this, &Machine]()
+		{
+			FU_BroadcastOperationFailure<Provider>(Machine.Get().RootKind);
+		};
+		FFU_OnlineOperationPathDispatcher::DispatchInternal(Event, RecoveryGeneration, false, Sinks);
 	}
 	return bStarted;
 }

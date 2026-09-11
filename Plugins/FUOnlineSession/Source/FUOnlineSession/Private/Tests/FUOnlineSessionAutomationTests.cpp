@@ -185,7 +185,8 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 			TEXT("FU.Recovery.Destroy.CallbackFailed"), TEXT("SessionStillExists") },
 		{ EFU_RecoveryDestroyDiagnosticOutcome::CallbackFailed, false, EFU_OperationAction::RequestLeaseRelease,
 			TEXT("FU.Recovery.Destroy.CallbackFailed"), TEXT("LeaseReleaseRequested") },
-		{ EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout, true, EFU_OperationAction::KeepOriginalDelegate,
+		{ EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout, true,
+			EFU_OperationAction::ClearWatchdog | EFU_OperationAction::KeepOriginalDelegate,
 			TEXT("FU.Recovery.Destroy.RepeatedTimeout"), TEXT("WaitingForCallback") },
 	};
 
@@ -273,6 +274,7 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 	{
 		EDispatchPath Path;
 		bool bReenterDuringDiagnostic;
+		bool bReplaceResourceWithoutNewGeneration;
 		bool bRequestRecoveryDestroy;
 		int32 ExpectedDiagnosticCount;
 		int32 ExpectedExactCleanupCount;
@@ -281,19 +283,21 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 		const TCHAR* ExpectedOrder;
 	};
 	const FDispatchCase DispatchCases[] = {
-		{ EDispatchPath::RecoveringCreate, false, true, 1, 1, 1, 1,
+		{ EDispatchPath::RecoveringCreate, false, false, true, 1, 1, 1, 1,
 			TEXT("Diagnostic,ExactCleanup,SharedCleanup,RecoveryDestroy") },
-		{ EDispatchPath::RecoveringJoin, false, true, 1, 1, 1, 1,
+		{ EDispatchPath::RecoveringJoin, false, false, true, 1, 1, 1, 1,
 			TEXT("Diagnostic,ExactCleanup,SharedCleanup,RecoveryDestroy") },
-		{ EDispatchPath::FindOriginalWins, true, false, 1, 1, 0, 0,
+		{ EDispatchPath::FindOriginalWins, true, false, false, 1, 1, 0, 0,
 			TEXT("Diagnostic,ExactCleanup") },
-		{ EDispatchPath::CancelSuccess, true, false, 1, 1, 0, 0,
+		{ EDispatchPath::FindOriginalWins, false, true, false, 1, 1, 0, 0,
 			TEXT("Diagnostic,ExactCleanup") },
-		{ EDispatchPath::CancelFailure, false, false, 1, 1, 1, 0,
+		{ EDispatchPath::CancelSuccess, true, false, false, 1, 1, 0, 0,
+			TEXT("Diagnostic,ExactCleanup") },
+		{ EDispatchPath::CancelFailure, false, false, false, 1, 1, 1, 0,
 			TEXT("Diagnostic,ExactCleanup,SharedCleanup") },
-		{ EDispatchPath::RecoveryDestroyRepeatedTimeout, false, false, 1, 1, 1, 0,
+		{ EDispatchPath::RecoveryDestroyRepeatedTimeout, false, false, false, 1, 1, 1, 0,
 			TEXT("Diagnostic,ExactCleanup,SharedCleanup") },
-		{ EDispatchPath::StaleNoOp, false, true, 0, 0, 0, 0, TEXT("") },
+		{ EDispatchPath::StaleNoOp, false, false, true, 0, 0, 0, 0, TEXT("") },
 	};
 	for (const FDispatchCase& TestCase : DispatchCases)
 	{
@@ -360,8 +364,13 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 				CurrentGeneration = CompletedGeneration + 1;
 				SharedCurrentResource = 200;
 			}
+			else if (TestCase.bReplaceResourceWithoutNewGeneration)
+			{
+				SharedCurrentResource = 200;
+			}
 		};
 		Sinks.CurrentGeneration = [&]() { return CurrentGeneration; };
+		Sinks.SharedResourcesStillMatch = [&]() { return SharedCurrentResource == 100; };
 		Sinks.ExactOldResourceCleanup = [&]()
 		{
 			DispatchOrder.Add(TEXT("ExactCleanup"));
@@ -382,7 +391,8 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 		Sinks.LegacyCompletion = [&]() { ++LegacyCompletionCount; };
 		Sinks.Travel = [&]() { ++TravelCount; };
 
-		FFU_OnlineOperationPathDispatcher::DispatchInternal(
+		const FFU_OnlineOperationPathDispatchResult DispatchResult =
+			FFU_OnlineOperationPathDispatcher::DispatchInternal(
 			Event,
 			CompletedGeneration,
 			TestCase.bRequestRecoveryDestroy,
@@ -394,11 +404,19 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("dispatcher recovery Destroy sink 次数"), RecoveryDestroyCount, TestCase.ExpectedRecoveryDestroyCount);
 		TestEqual(TEXT("内部 outcome 不触发 legacy completion sink"), LegacyCompletionCount, 0);
 		TestEqual(TEXT("内部 outcome 不触发 travel sink"), TravelCount, 0);
+		TestFalse(TEXT("production plan 显式禁止 legacy completion"), DispatchResult.bLegacyCompletion);
+		TestFalse(TEXT("production plan 显式禁止 travel"), DispatchResult.bTravel);
+		TestEqual(TEXT("production plan 记录 exact cleanup"), DispatchResult.bExactOldResourceCleanup,
+			TestCase.ExpectedExactCleanupCount != 0);
+		TestEqual(TEXT("production plan 记录 recovery Destroy"), DispatchResult.bRecoveryDestroySubmission,
+			TestCase.ExpectedRecoveryDestroyCount != 0);
 		TestEqual(TEXT("dispatcher 顺序稳定"), FString::Join(DispatchOrder, TEXT(",")), FString(TestCase.ExpectedOrder));
 		TestEqual(TEXT("有效 outcome 必须清掉捕获的旧资源"), CapturedOldResource,
 			TestCase.ExpectedExactCleanupCount == 0 ? 100 : 0);
 		TestEqual(TEXT("重入后新 generation 的共享资源不被旧回调清理"), SharedCurrentResource,
-			TestCase.bReenterDuringDiagnostic ? 200 : (TestCase.ExpectedSharedCleanupCount == 0 ? 100 : 0));
+			(TestCase.bReenterDuringDiagnostic || TestCase.bReplaceResourceWithoutNewGeneration)
+				? 200
+				: (TestCase.ExpectedSharedCleanupCount == 0 ? 100 : 0));
 	}
 	return true;
 }
