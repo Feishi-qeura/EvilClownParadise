@@ -746,7 +746,7 @@ EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::RequestRelease(
 			TEXT("忽略非租约所有者的 GameNetDriver 释放请求：Provider=%s Reason=%s"),
 			Provider == EFU_OnlineProvider::Steam ? TEXT("Steam") : TEXT("Lan/NULL"),
 			Reason ? Reason : TEXT("Unknown"));
-		return;
+		return EFU_NetDriverLeaseResult::NotOwner;
 	}
 	GLease->bReleaseRequested = true;
 	UE_LOG(LogFUOnlineSession, Display, TEXT("请求释放 GameNetDriver 租约：%s"), Reason ? Reason : TEXT("Unknown"));
