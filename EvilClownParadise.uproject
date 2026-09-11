@@ -7,7 +7,11 @@
 		{
 			"Name": "EvilClownParadise",
 			"Type": "Runtime",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"Engine",
+				"AIModule"
+			]
 		}
 	],
 	"Plugins": [
@@ -24,6 +28,7 @@
 		},
 		{
 			"Name": "OnlineSubsystemSteam",
+			"Name": "GameplayStateTree",
 			"Enabled": true
 		}
 	]
