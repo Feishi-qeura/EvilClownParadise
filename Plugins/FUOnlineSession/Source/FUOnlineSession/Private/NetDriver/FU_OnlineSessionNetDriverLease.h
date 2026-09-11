@@ -111,6 +111,40 @@ private:
 };
 
 /**
+ * OS 进程环境中四个哨兵的纯快照。
+ * 当前 PID 由调用边界显式传入，测试可模拟 DLL static 清空与子进程继承而无需真的卸载模块。
+ */
+struct FFU_NetDriverLeasePersistentBlockerSnapshot
+{
+	uint32 CurrentProcessId = 0;
+	FString SteamUncertainOperationSentinel;
+	FString LanUncertainOperationSentinel;
+	FString SteamOrphanedLeaseSentinel;
+	FString LanOrphanedLeaseSentinel;
+};
+
+/** 解析进程哨兵后的只读安全结论；Provider blocker 与共享遗留租约事实分开表达。 */
+struct FFU_NetDriverLeasePersistentBlockerDecision
+{
+	bool bSteamRestartRequired = false;
+	bool bLanRestartRequired = false;
+	bool bOrphanedLeaseRestartRequired = false;
+	EFU_OnlineProvider OrphanedLeaseProvider = EFU_OnlineProvider::Lan;
+};
+
+/**
+ * 跨模块生命周期的纯哨兵协议。
+ * 值仅包含固定版本标记和 PID，不写磁盘/配置/注册表，也不包含房间、用户或凭据信息。
+ */
+class FFU_NetDriverLeasePersistentBlockerPolicy final
+{
+public:
+	static FString BuildSentinel(uint32 ProcessId);
+	static FFU_NetDriverLeasePersistentBlockerDecision Evaluate(
+		const FFU_NetDriverLeasePersistentBlockerSnapshot& Snapshot);
+};
+
+/**
  * 进程级 GameNetDriver 租约。
  *
  * Provider traits 仍是 Steam/LAN 类名的唯一来源；本类只负责把已选择的类名安全地临时安装到
@@ -131,7 +165,8 @@ public:
 	static EFU_NetDriverLeaseResult EvaluateRestore(
 		const FFU_NetDriverLeaseFingerprint& Expected,
 		const FFU_NetDriverLeaseFingerprint& Current,
-		bool bAllWorldsClear);
+		bool bAllWorldsClear,
+		bool bProviderRestartRequired = false);
 	static bool EvaluateReleaseComplete(const FFU_NetDriverLeaseReleaseSnapshot& Snapshot);
 
 	/** 只读取当前进程状态；用于 ProviderStatus 在不改写 GEngine 的前提下预报租约冲突。 */

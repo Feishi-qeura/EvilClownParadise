@@ -483,6 +483,84 @@ bool FFUOnlineSessionNetDriverLeaseTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Steam blocker 不污染 LAN 的精确状态"), Blockers.IsRestartRequired(EFU_OnlineProvider::Lan));
 	Blockers.Register(EFU_OnlineProvider::Lan);
 	TestTrue(TEXT("LAN 可独立登记重启要求"), Blockers.IsRestartRequired(EFU_OnlineProvider::Lan));
+
+	// 【Fix round 2 RED：跨模块重载仍须保持进程 blocker】这里不真正卸载测试模块，而是只保留
+	// 模块外哨兵字符串并创建一份全新的纯快照，等价模拟 DLL static 全部析构后重新初始化。
+	constexpr uint32 OriginalProcessId = 424242;
+	const FString SameProcessSentinel =
+		FFU_NetDriverLeasePersistentBlockerPolicy::BuildSentinel(OriginalProcessId);
+	FFU_NetDriverLeasePersistentBlockerSnapshot ReloadedModuleSnapshot;
+	ReloadedModuleSnapshot.CurrentProcessId = OriginalProcessId;
+	ReloadedModuleSnapshot.SteamUncertainOperationSentinel = SameProcessSentinel;
+	ReloadedModuleSnapshot.SteamOrphanedLeaseSentinel = SameProcessSentinel;
+	FFU_NetDriverLeaseUncertainOperationBlockers ClearedModuleStatics;
+	TestFalse(
+		TEXT("模拟重载时新模块 static 本身已经清空"),
+		ClearedModuleStatics.IsRestartRequired(EFU_OnlineProvider::Steam));
+	const FFU_NetDriverLeasePersistentBlockerDecision SameProcessDecision =
+		FFU_NetDriverLeasePersistentBlockerPolicy::Evaluate(ReloadedModuleSnapshot);
+	TestTrue(TEXT("同 PID 重载后仍检测 Steam blocker"), SameProcessDecision.bSteamRestartRequired);
+	TestFalse(TEXT("Steam 持久 blocker 不污染 LAN"), SameProcessDecision.bLanRestartRequired);
+	TestTrue(TEXT("同 PID 重载后仍检测遗留共享租约"), SameProcessDecision.bOrphanedLeaseRestartRequired);
+	TestEqual(TEXT("遗留租约保留精确 Steam Provider"), SameProcessDecision.OrphanedLeaseProvider, EFU_OnlineProvider::Steam);
+	FFU_NetDriverLeasePreflight ReloadedAcquire;
+	ReloadedAcquire.bIsGameThread = true;
+	ReloadedAcquire.GameNetDriverDefinitionCount = 1;
+	ReloadedAcquire.bRequestedProviderRestartRequired = SameProcessDecision.bSteamRestartRequired;
+	ReloadedAcquire.bExistingLeaseProviderRestartRequired = SameProcessDecision.bOrphanedLeaseRestartRequired;
+	TestEqual(
+		TEXT("同 PID 新模块不能重新 acquire 遗留 Steam 定义"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(ReloadedAcquire),
+		EFU_NetDriverLeaseResult::RestartRequired);
+	ReloadedAcquire.bLeaseExists = true;
+	ReloadedAcquire.bLeaseOwnerExpired = true;
+	ReloadedAcquire.bInstalledValueStillMatches = true;
+	TestEqual(
+		TEXT("同 PID 新模块不能 stale-owner reclaim"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(ReloadedAcquire),
+		EFU_NetDriverLeaseResult::RestartRequired);
+	FFU_NetDriverLeaseReleaseSnapshot ReloadedRelease;
+	ReloadedRelease.bIsGameThread = true;
+	ReloadedRelease.bOwnerValid = true;
+	ReloadedRelease.bProviderRestartRequired = SameProcessDecision.bSteamRestartRequired;
+	TestFalse(
+		TEXT("同 PID 新模块不能把遗留 Steam 租约判成已释放"),
+		FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(ReloadedRelease));
+	TestEqual(
+		TEXT("同 PID 新模块不能恢复遗留 Steam 定义"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(
+			Expected, Expected, true, SameProcessDecision.bSteamRestartRequired),
+		EFU_NetDriverLeaseResult::RestartRequired);
+
+	// 子进程会继承环境变量，但 PID 不同；继承值必须被识别为上一进程的陈旧哨兵，
+	// 否则真正的新进程会被错误地要求重启第二次。
+	ReloadedModuleSnapshot.CurrentProcessId = OriginalProcessId + 1;
+	const FFU_NetDriverLeasePersistentBlockerDecision NewProcessDecision =
+		FFU_NetDriverLeasePersistentBlockerPolicy::Evaluate(ReloadedModuleSnapshot);
+	TestFalse(TEXT("不同 PID 不继承 Steam blocker"), NewProcessDecision.bSteamRestartRequired);
+	TestFalse(TEXT("不同 PID 不继承 LAN blocker"), NewProcessDecision.bLanRestartRequired);
+	TestFalse(TEXT("不同 PID 不继承遗留租约阻断"), NewProcessDecision.bOrphanedLeaseRestartRequired);
+	FFU_NetDriverLeasePreflight NewProcessAcquire;
+	NewProcessAcquire.bIsGameThread = true;
+	NewProcessAcquire.GameNetDriverDefinitionCount = 1;
+	NewProcessAcquire.bRequestedProviderRestartRequired = NewProcessDecision.bSteamRestartRequired;
+	NewProcessAcquire.bExistingLeaseProviderRestartRequired = NewProcessDecision.bOrphanedLeaseRestartRequired;
+	TestEqual(
+		TEXT("不同 PID 的真正新进程可从干净定义正常 acquire"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(NewProcessAcquire),
+		EFU_NetDriverLeaseResult::Acquired);
+
+	// 同一 PID 下每个 Provider 使用独立哨兵；LAN 版本不得反向设置 Steam。
+	FFU_NetDriverLeasePersistentBlockerSnapshot LanOnlySnapshot;
+	LanOnlySnapshot.CurrentProcessId = OriginalProcessId;
+	LanOnlySnapshot.LanUncertainOperationSentinel = SameProcessSentinel;
+	LanOnlySnapshot.LanOrphanedLeaseSentinel = SameProcessSentinel;
+	const FFU_NetDriverLeasePersistentBlockerDecision LanOnlyDecision =
+		FFU_NetDriverLeasePersistentBlockerPolicy::Evaluate(LanOnlySnapshot);
+	TestFalse(TEXT("LAN 持久 blocker 不污染 Steam"), LanOnlyDecision.bSteamRestartRequired);
+	TestTrue(TEXT("同 PID 重载后仍检测 LAN blocker"), LanOnlyDecision.bLanRestartRequired);
+	TestTrue(TEXT("同 PID 重载后检测 LAN 遗留租约"), LanOnlyDecision.bOrphanedLeaseRestartRequired);
+	TestEqual(TEXT("遗留租约保留精确 LAN Provider"), LanOnlyDecision.OrphanedLeaseProvider, EFU_OnlineProvider::Lan);
 	return true;
 }
 

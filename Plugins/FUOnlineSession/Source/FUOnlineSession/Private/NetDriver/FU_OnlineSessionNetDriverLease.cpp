@@ -6,9 +6,22 @@
 #include "Engine/NetDriver.h"
 #include "Engine/PendingNetGame.h"
 #include "Engine/World.h"
+#include "HAL/PlatformMisc.h"
+#include "HAL/PlatformProcess.h"
 
 namespace FUOnlineSessionNetDriverLeasePrivate
 {
+	// 环境变量属于 OS 进程而非 DLL；模块卸载不会清除它们。名称带协议版本，值还会绑定 PID，
+	// 因此子进程继承变量后不会把上一进程的 blocker 当成自己的状态。
+	const TCHAR* const SteamUncertainOperationEnvironment =
+		TEXT("FUONLINESESSION_UNCERTAIN_STEAM_V1");
+	const TCHAR* const LanUncertainOperationEnvironment =
+		TEXT("FUONLINESESSION_UNCERTAIN_LAN_V1");
+	const TCHAR* const SteamOrphanedLeaseEnvironment =
+		TEXT("FUONLINESESSION_ORPHANED_LEASE_STEAM_V1");
+	const TCHAR* const LanOrphanedLeaseEnvironment =
+		TEXT("FUONLINESESSION_ORPHANED_LEASE_LAN_V1");
+
 	/** 进程中最多一份租约；同一 GameInstance/Provider 的重入通过 AlreadyOwned 表达。 */
 	struct FLeaseState
 	{
@@ -28,6 +41,34 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 	FFU_NetDriverLeaseUncertainOperationBlockers GUncertainOperationBlockers;
 	// RemoveTicker 在当前 ticker 回调内部调用会等待自身结束，因此必须区分“由回调自然返回 false”与外部撤销。
 	bool bInsideDeferredReleaseTicker = false;
+
+	/** 每次决策都重新读取模块外哨兵；不能仅在模块 Startup 时复制一次后继续信任 static。 */
+	FFU_NetDriverLeasePersistentBlockerDecision CapturePersistentBlockerDecision()
+	{
+		FFU_NetDriverLeasePersistentBlockerSnapshot Snapshot;
+		Snapshot.CurrentProcessId = FPlatformProcess::GetCurrentProcessId();
+		Snapshot.SteamUncertainOperationSentinel =
+			FPlatformMisc::GetEnvironmentVariable(SteamUncertainOperationEnvironment);
+		Snapshot.LanUncertainOperationSentinel =
+			FPlatformMisc::GetEnvironmentVariable(LanUncertainOperationEnvironment);
+		Snapshot.SteamOrphanedLeaseSentinel =
+			FPlatformMisc::GetEnvironmentVariable(SteamOrphanedLeaseEnvironment);
+		Snapshot.LanOrphanedLeaseSentinel =
+			FPlatformMisc::GetEnvironmentVariable(LanOrphanedLeaseEnvironment);
+		return FFU_NetDriverLeasePersistentBlockerPolicy::Evaluate(Snapshot);
+	}
+
+	bool IsProviderRestartRequiredInCurrentProcess(const EFU_OnlineProvider Provider)
+	{
+		const FFU_NetDriverLeasePersistentBlockerDecision Persistent =
+			CapturePersistentBlockerDecision();
+		const bool bPersistentlyBlocked = Provider == EFU_OnlineProvider::Steam
+			? Persistent.bSteamRestartRequired
+			: Provider == EFU_OnlineProvider::Lan
+				? Persistent.bLanRestartRequired
+				: true;
+		return GUncertainOperationBlockers.IsRestartRequired(Provider) || bPersistentlyBlocked;
+	}
 
 	const TCHAR* ToText(const EFU_NetDriverLeaseResult Result)
 	{
@@ -167,8 +208,20 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 	{
 		FFU_NetDriverLeasePreflight Result;
 		Result.bIsGameThread = IsInGameThread();
+		const FFU_NetDriverLeasePersistentBlockerDecision Persistent =
+			CapturePersistentBlockerDecision();
+		const bool bPersistentRequestedProviderBlock = Provider == EFU_OnlineProvider::Steam
+			? Persistent.bSteamRestartRequired
+			: Provider == EFU_OnlineProvider::Lan
+				? Persistent.bLanRestartRequired
+				: true;
 		Result.bRequestedProviderRestartRequired =
-			GUncertainOperationBlockers.IsRestartRequired(Provider);
+			GUncertainOperationBlockers.IsRestartRequired(Provider)
+			|| bPersistentRequestedProviderBlock;
+		// 若旧模块在未知操作期间卸载，原租约对象/指纹会随 DLL static 消失；独立的 orphan 哨兵
+		// 证明当前全局定义不能被当成新基线，因此即使本模块看不到 GLease 也必须阻断任何 Acquire。
+		Result.bExistingLeaseProviderRestartRequired =
+			Persistent.bOrphanedLeaseRestartRequired;
 		if (!Result.bIsGameThread || !GEngine)
 		{
 			return Result;
@@ -225,7 +278,8 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 			const FFU_NetDriverLeaseFingerprint Current = CaptureFingerprintAtIndex(GLease->Fingerprint.DefinitionIndex);
 			Result.bInstalledValueStillMatches = HasSameDefinitionIdentity(GLease->Fingerprint, Current);
 			Result.bExistingLeaseProviderRestartRequired =
-				GUncertainOperationBlockers.IsRestartRequired(GLease->Provider);
+				Result.bExistingLeaseProviderRestartRequired
+				|| IsProviderRestartRequiredInCurrentProcess(GLease->Provider);
 		}
 
 		return Result;
@@ -246,7 +300,10 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 		{
 			return EFU_NetDriverLeaseResult::NotGameThread;
 		}
-		if (GUncertainOperationBlockers.IsRestartRequired(GLease->Provider))
+		const FFU_NetDriverLeasePersistentBlockerDecision Persistent =
+			CapturePersistentBlockerDecision();
+		if (IsProviderRestartRequiredInCurrentProcess(GLease->Provider)
+			|| Persistent.bOrphanedLeaseRestartRequired)
 		{
 			// 已解绑的 UObject 不再有可靠回调证明；即使所有 World 暂时清空，也不能把
 			// “当前没有驱动”误当成旧 OSS 请求已终止。该租约保持安装态直到进程重启。
@@ -306,6 +363,44 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 				return HandleDeferredReleaseTicker(DeltaTime);
 			});
 	}
+}
+
+FString FFU_NetDriverLeasePersistentBlockerPolicy::BuildSentinel(const uint32 ProcessId)
+{
+	// PID=0 不是有效的持久身份；返回空值使解析端 fail-closed 为“没有可归属哨兵”，
+	// 避免测试或异常平台把一个无进程归属的值传播给所有后继进程。
+	return ProcessId == 0
+		? FString()
+		: FString::Printf(TEXT("FUOS.UncertainOperation.v1.PID=%u"), ProcessId);
+}
+
+FFU_NetDriverLeasePersistentBlockerDecision FFU_NetDriverLeasePersistentBlockerPolicy::Evaluate(
+	const FFU_NetDriverLeasePersistentBlockerSnapshot& Snapshot)
+{
+	FFU_NetDriverLeasePersistentBlockerDecision Result;
+	const FString ExpectedSentinel = BuildSentinel(Snapshot.CurrentProcessId);
+	if (ExpectedSentinel.IsEmpty())
+	{
+		return Result;
+	}
+
+	// 只接受当前 PID 的完整、版本化固定值。子进程虽然继承父环境，但 CurrentProcessId 不同，
+	// 因而四项均为 false；同一进程 DLL 重载则 PID 不变，仍能恢复原 blocker 事实。
+	Result.bSteamRestartRequired =
+		Snapshot.SteamUncertainOperationSentinel == ExpectedSentinel;
+	Result.bLanRestartRequired =
+		Snapshot.LanUncertainOperationSentinel == ExpectedSentinel;
+	const bool bSteamOrphanedLease =
+		Snapshot.SteamOrphanedLeaseSentinel == ExpectedSentinel;
+	const bool bLanOrphanedLease =
+		Snapshot.LanOrphanedLeaseSentinel == ExpectedSentinel;
+	Result.bOrphanedLeaseRestartRequired = bSteamOrphanedLease || bLanOrphanedLease;
+	// 进程级 GameNetDriver 同时只能有一份 FU 租约。若外部错误地制造双哨兵，
+	// 仍保持 fail-closed；Provider 字段只用于诊断，优先报告 Steam 不会授权任何恢复写入。
+	Result.OrphanedLeaseProvider = bSteamOrphanedLease
+		? EFU_OnlineProvider::Steam
+		: EFU_OnlineProvider::Lan;
+	return Result;
 }
 
 void FFU_NetDriverLeaseUncertainOperationBlockers::Register(const EFU_OnlineProvider Provider)
@@ -432,8 +527,15 @@ EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::EvaluateAcquire(
 EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::EvaluateRestore(
 	const FFU_NetDriverLeaseFingerprint& Expected,
 	const FFU_NetDriverLeaseFingerprint& Current,
-	const bool bAllWorldsClear)
+	const bool bAllWorldsClear,
+	const bool bProviderRestartRequired)
 {
+	if (bProviderRestartRequired)
+	{
+		// 模块重载后可能已没有可用的原始指纹对象；只要 PID 绑定哨兵仍在，
+		// 恢复决策必须在比较/解引用任何指纹前返回 RestartRequired，绝不猜测全局定义来源。
+		return EFU_NetDriverLeaseResult::RestartRequired;
+	}
 	// 指纹失配与 World 是否仍活动无关；先毒化可立即停止 ticker，且此分支从不写引擎状态。
 	if (!FUOnlineSessionNetDriverLeasePrivate::HasSameDefinitionIdentity(Expected, Current))
 	{
@@ -596,6 +698,26 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 		UE_LOG(LogFUOnlineSession, Error, TEXT("拒绝从非游戏线程释放 GameNetDriver 租约"));
 		return;
 	}
+	if (IsProviderRestartRequiredInCurrentProcess(Provider))
+	{
+		// DLL 重载后 GLease 可能已自然析构，所以必须先检查模块外 blocker、再判断“当前无租约”。
+		// 对同 Provider 的释放请求明确保持 RestartRequired；若旧 static 租约仍在，也撤销其恢复 ticker。
+		if (GLease.IsSet() && GLease->Provider == Provider)
+		{
+			if (GLease->DeferredReleaseTicker.IsValid())
+			{
+				FTSTicker::RemoveTicker(GLease->DeferredReleaseTicker);
+				GLease->DeferredReleaseTicker.Reset();
+			}
+			GLease->bReleaseRequested = false;
+		}
+		UE_LOG(
+			LogFUOnlineSession,
+			Error,
+			TEXT("拒绝释放 GameNetDriver：Provider 存在跨模块未知 OSS 操作，必须重启进程。Reason=%s"),
+			Reason ? Reason : TEXT("Unknown"));
+		return;
+	}
 	if (!GLease.IsSet())
 	{
 		return;
@@ -624,24 +746,6 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 			Reason ? Reason : TEXT("Unknown"));
 		return;
 	}
-	if (GUncertainOperationBlockers.IsRestartRequired(Provider))
-	{
-		// 终态未知 blocker 不可自动清除，也不可继续保留一个永远重试的 ticker；
-		// 保留租约与当前安装值，明确要求重启，避免迟到成功使用已被恢复/改写的 GameNetDriver。
-		if (GLease->DeferredReleaseTicker.IsValid())
-		{
-			FTSTicker::RemoveTicker(GLease->DeferredReleaseTicker);
-			GLease->DeferredReleaseTicker.Reset();
-		}
-		GLease->bReleaseRequested = false;
-		UE_LOG(
-			LogFUOnlineSession,
-			Error,
-			TEXT("拒绝释放 GameNetDriver：Provider 存在析构后未知 OSS 操作，必须重启进程。Reason=%s"),
-			Reason ? Reason : TEXT("Unknown"));
-		return;
-	}
-
 	GLease->bReleaseRequested = true;
 	UE_LOG(LogFUOnlineSession, Display, TEXT("请求释放 GameNetDriver 租约：%s"), Reason ? Reason : TEXT("Unknown"));
 
@@ -660,9 +764,23 @@ void FFU_OnlineSessionNetDriverLease::RegisterUncertainOperation(
 	// GameInstanceSubsystem::Deinitialize 正常位于游戏线程；错误线程无法安全检查/撤销 ticker，
 	// 但 blocker 本身仍必须登记为进程事实，不能因生命周期调用异常而放行后续新 Owner。
 	GUncertainOperationBlockers.Register(Provider);
+	const uint32 ProcessId = FPlatformProcess::GetCurrentProcessId();
+	const FString ProcessSentinel = FFU_NetDriverLeasePersistentBlockerPolicy::BuildSentinel(ProcessId);
+	const TCHAR* const ProviderEnvironment = Provider == EFU_OnlineProvider::Steam
+		? SteamUncertainOperationEnvironment
+		: LanUncertainOperationEnvironment;
+	// 环境值只含固定协议和 PID，不含用户、房间或连接数据；OS 进程环境在 DLL unload 后保留，
+	// 而新进程/继承它的子进程因 PID 不同会由纯策略忽略该值。
+	FPlatformMisc::SetEnvironmentVar(ProviderEnvironment, *ProcessSentinel);
 
 	if (IsInGameThread() && GLease.IsSet() && GLease->Provider == Provider)
 	{
+		const TCHAR* const OrphanedLeaseEnvironment = Provider == EFU_OnlineProvider::Steam
+			? SteamOrphanedLeaseEnvironment
+			: LanOrphanedLeaseEnvironment;
+		// 原指纹属于即将卸载模块的 static；额外保存“遗留共享定义不可再写”的进程哨兵，
+		// 让重载后的新模块即使没有 GLease 也不能把当前安装值错误快照成新的 Original。
+		FPlatformMisc::SetEnvironmentVar(OrphanedLeaseEnvironment, *ProcessSentinel);
 		if (GLease->DeferredReleaseTicker.IsValid())
 		{
 			FTSTicker::RemoveTicker(GLease->DeferredReleaseTicker);
@@ -682,7 +800,7 @@ void FFU_OnlineSessionNetDriverLease::RegisterUncertainOperation(
 bool FFU_OnlineSessionNetDriverLease::IsProviderRestartRequired(
 	const EFU_OnlineProvider Provider)
 {
-	return FUOnlineSessionNetDriverLeasePrivate::GUncertainOperationBlockers.IsRestartRequired(Provider);
+	return FUOnlineSessionNetDriverLeasePrivate::IsProviderRestartRequiredInCurrentProcess(Provider);
 }
 
 void FFU_OnlineSessionNetDriverLease::TickDeferredRelease()
@@ -723,7 +841,7 @@ bool FFU_OnlineSessionNetDriverLease::IsReleaseComplete(
 	}
 
 	Snapshot.bProcessLeasePoisoned = bProcessLeasePoisoned;
-	Snapshot.bProviderRestartRequired = GUncertainOperationBlockers.IsRestartRequired(Provider);
+	Snapshot.bProviderRestartRequired = IsProviderRestartRequiredInCurrentProcess(Provider);
 	Snapshot.bLeaseExists = GLease.IsSet();
 	if (GLease.IsSet())
 	{
@@ -756,6 +874,22 @@ void FFU_OnlineSessionNetDriverLease::ShutdownModule()
 	{
 		FTSTicker::RemoveTicker(GLease->DeferredReleaseTicker);
 		GLease->DeferredReleaseTicker.Reset();
+	}
+
+	const FFU_NetDriverLeasePersistentBlockerDecision Persistent =
+		CapturePersistentBlockerDecision();
+	if (IsProviderRestartRequiredInCurrentProcess(GLease->Provider)
+		|| Persistent.bOrphanedLeaseRestartRequired)
+	{
+		// 不确定 OSS 请求的 UObject delegate 已解绑，模块卸载前绝不能再尝试恢复全局定义。
+		// 这里也刻意不调用 ResetLeaseState：GLease 的 C++ static 会随 DLL 自然析构，但真正的安全证据
+		// 位于 PID 绑定的 OS 进程环境中；同进程重载后新模块会先读到它并继续拒绝任何写入。
+		GLease->bReleaseRequested = false;
+		UE_LOG(
+			LogFUOnlineSession,
+			Error,
+			TEXT("Runtime 卸载时保留未知操作的 GameNetDriver 安装值；跨模块 blocker 仍有效，必须重启进程。"));
+		return;
 	}
 
 	// 模块卸载后不允许保留会回调已卸载代码的 ticker；仅尝试一次安全恢复，绝不强制覆盖。
