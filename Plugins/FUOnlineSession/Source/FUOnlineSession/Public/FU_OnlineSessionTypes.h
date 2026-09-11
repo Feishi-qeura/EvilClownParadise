@@ -200,6 +200,11 @@ struct FUONLINESESSION_API FFU_OnlineProviderStatus
 	// Blueprint 可直接展示/写入工单，而不必把所有失败都猜成同一个通用状态。
 	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
 	FString NetDriverLeaseStatus;
+
+	// 【Task 7 Blueprint 关联】状态检查与 RunProviderDiagnostics 共享的稳定诊断代码；
+	// 只描述已得出的 StatusCode，不携带房间、密码、连接串或其他调用输入。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	FName DiagnosticCode = NAME_None;
 };
 
 /** Blueprint-safe snapshot of a discovered online session. */

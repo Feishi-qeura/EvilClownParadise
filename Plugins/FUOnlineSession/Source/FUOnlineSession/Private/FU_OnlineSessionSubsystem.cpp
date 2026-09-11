@@ -123,7 +123,34 @@ namespace FUOnlineSession
 			return TEXT("未知的在线提供方状态");
 		}
 	}
-	
+
+	/**
+	 * 预检代码必须由公开 StatusCode 派生，不能用另一份 Provider/环境真相表拼接字符串。
+	 * 这些稳定代码同时供 Blueprint、诊断报告与自动化断言使用，Message 仍交给统一 sanitizer 处理。
+	 */
+	const TCHAR* GetProviderStatusDiagnosticCode(const EFU_OnlineProviderStatusCode StatusCode)
+	{
+		switch (StatusCode)
+		{
+		case EFU_OnlineProviderStatusCode::Ready: return TEXT("FU.Provider.Ready");
+		case EFU_OnlineProviderStatusCode::WorldUnavailable: return TEXT("FU.Provider.WorldUnavailable");
+		case EFU_OnlineProviderStatusCode::SubsystemUnavailable: return TEXT("FU.Provider.SubsystemUnavailable");
+		case EFU_OnlineProviderStatusCode::SessionInterfaceUnavailable: return TEXT("FU.Provider.SessionInterfaceUnavailable");
+		case EFU_OnlineProviderStatusCode::IdentityInterfaceUnavailable: return TEXT("FU.Provider.IdentityInterfaceUnavailable");
+		case EFU_OnlineProviderStatusCode::NotLoggedIn: return TEXT("FU.Provider.NotLoggedIn");
+		case EFU_OnlineProviderStatusCode::NetDriverDefinitionUnavailable: return TEXT("FU.Provider.NetDriverDefinitionUnavailable");
+		case EFU_OnlineProviderStatusCode::NetDriverClassUnavailable: return TEXT("FU.Provider.NetDriverClassUnavailable");
+		case EFU_OnlineProviderStatusCode::ActiveNetDriverConflict: return TEXT("FU.Provider.ActiveNetDriverConflict");
+		case EFU_OnlineProviderStatusCode::NetDriverLeaseUnavailable: return TEXT("FU.Provider.NetDriverLeaseUnavailable");
+		case EFU_OnlineProviderStatusCode::SteamAppIdBootstrapInvalid: return TEXT("FU.Provider.SteamAppIdBootstrapInvalid");
+		case EFU_OnlineProviderStatusCode::SteamSocketsModuleUnavailable: return TEXT("FU.Provider.SteamSocketsModuleUnavailable");
+		case EFU_OnlineProviderStatusCode::SteamSocketsDisabled: return TEXT("FU.Provider.SteamSocketsDisabled");
+		case EFU_OnlineProviderStatusCode::SteamSocketsSocketSubsystemUnavailable: return TEXT("FU.Provider.SteamSocketsSocketSubsystemUnavailable");
+		case EFU_OnlineProviderStatusCode::ShippingSteamAppIdMissing: return TEXT("FU.Provider.ShippingSteamAppIdMissing");
+		case EFU_OnlineProviderStatusCode::SteamAppIdMismatch: return TEXT("FU.Provider.SteamAppIdMismatch");
+		default: return TEXT("FU.Provider.Unknown");
+		}
+	}
 }
 
 /**
@@ -185,8 +212,7 @@ template<EFU_OnlineProvider Provider>
 FFU_OperationTicket UFU_OnlineSessionSubsystem::FU_BeginOperationAttempt(const EFU_OperationKind RootKind)
 {
 	FFU_OperationTicket Ticket = FU_GetOperationMachine<Provider>().BeginAttempt(RootKind);
-	FU_EmitOperationDiagnostic(
-		Provider,
+	FU_EmitDiagnostic<Provider>(
 		RootKind,
 		Ticket.OperationId,
 		EFU_OnlineDiagnosticPhase::Requested,
@@ -215,8 +241,7 @@ bool UFU_OnlineSessionSubsystem::FU_SubmitOperation(
 	Ticket.Generation = Machine.Get().ActiveGeneration;
 	Ticket.bAccepted = true;
 	OutGeneration = Ticket.Generation;
-	FU_EmitOperationDiagnostic(
-		Provider,
+	FU_EmitDiagnostic<Provider>(
 		SubmittedKind,
 		Machine.Get().ActiveOperationId,
 		EFU_OnlineDiagnosticPhase::Submitted,
@@ -318,8 +343,8 @@ IOnlineSessionPtr UFU_OnlineSessionSubsystem::FU_GetSessionInterface() const
 	IOnlineSubsystem* OnlineSubsystem = Online::GetSubsystem(GetWorld(), FProviderTraits::GetSubsystemName());
 	if (!OnlineSubsystem)
 	{
-		//参数；Traits同时为Steam和NULL提供可读的日志名称。
-		UE_LOG(LogTemp, Error, TEXT("在线子系统不可用：%s"), FProviderTraits::GetDebugName());
+		// 公开入口会以其原始 OperationId 发出 FU.Provider.SubsystemUnavailable；这里不能另记一条
+		// 无关联 LogTemp，否则同一拒绝会出现无法由 Blueprint/报告串联的第二份 Provider 结论。
 		return nullptr;
 	}
 	
@@ -572,6 +597,8 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus(
 
 	Result.StatusCode = FFU_OnlineProviderStatusEvaluator::Evaluate(Provider, Inputs);
 	Result.bIsReady = Result.StatusCode == EFU_OnlineProviderStatusCode::Ready;
+	// 蓝图状态节点与运行时诊断必须使用同一稳定代码，避免 UI 因 Message 本地化或文本变化失去分支依据。
+	Result.DiagnosticCode = FName(FUOnlineSession::GetProviderStatusDiagnosticCode(Result.StatusCode));
 	Result.Message = FUOnlineSession::GetProviderStatusMessage(Provider, Result.StatusCode);
 	if (Result.StatusCode == EFU_OnlineProviderStatusCode::NetDriverLeaseUnavailable)
 	{
@@ -583,8 +610,10 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus(
 
 template<EFU_OnlineProvider Provider>
 bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
+	const EFU_OperationKind RootKind,
+	const FGuid& OperationId,
 	const TCHAR* OperationName,
-	const bool bRequiresNetDriver) const
+	const bool bRequiresNetDriver)
 {
 	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
 
@@ -598,6 +627,14 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
 	const FFU_OnlineProviderStatus Status = FU_CheckProviderStatus<Provider>(bRequiresNetDriver);
 	if (Status.bIsReady)
 	{
+		// 预检通过同样需要可观察，Blueprint 可用同一 OperationId 串起 Requested -> Preflight -> Submitted。
+		FU_EmitDiagnostic<Provider>(
+			RootKind,
+			OperationId,
+			EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Info,
+			FUOnlineSession::GetProviderStatusDiagnosticCode(Status.StatusCode),
+			Status.Message);
 		return true;
 	}
 
@@ -630,6 +667,16 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
 		*Status.RequiredNetDriverClass.ToString(),
 		Status.ActiveNetDriverClass.IsNone() ? TEXT("None") : *Status.ActiveNetDriverClass.ToString(),
 		*Status.Message);
+
+	// 【Task 7 时序契约】先把拒绝原因与入口分配的 ID 写入历史/Blueprint，再由调用者广播旧失败委托。
+	// 不能在这里新建 Ticket，否则预销毁续步、Busy 拒绝与后续诊断会断开成不同操作。
+	FU_EmitDiagnostic<Provider>(
+		RootKind,
+		OperationId,
+		EFU_OnlineDiagnosticPhase::Preflight,
+		EFU_OnlineDiagnosticSeverity::Warning,
+		FUOnlineSession::GetProviderStatusDiagnosticCode(Status.StatusCode),
+		Status.Message);
 
 	return false;
 }
@@ -776,6 +823,8 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(
     //同一个Provider同一时间只能执行一个Session异步操作
     if (Machine.Get().Phase != EFU_OperationPhase::Idle)
     {
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.Busy"), TEXT("Destroy 请求被在途 OSS 操作拒绝"));
         if (InPendingOperation == EFU_PendingOperation::None)
         {
             OnDestroySessionComplete.Broadcast(Provider, false);
@@ -800,6 +849,8 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(
 
     if (!State.SessionInterface.IsValid())
     {
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.Provider.SessionInterfaceUnavailable"), TEXT("Destroy 无法取得 Session Interface"));
         if (InPendingOperation == EFU_PendingOperation::None)
         {
             OnDestroySessionComplete.Broadcast(Provider, false);
@@ -829,6 +880,8 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(
         }
         else
         {
+			FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Completed,
+				EFU_OnlineDiagnosticSeverity::Info, TEXT("FU.DestroySession.NoNamedSession"), TEXT("Destroy 未发现命名会话，按幂等成功完成"));
             if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() == Provider)
             {
                 ActiveGameplayProvider.Reset();
@@ -845,6 +898,8 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(
 	uint64 Generation = 0;
 	if (!FU_SubmitOperation<Provider>(*RootTicket, EFU_OperationKind::Destroy, Generation))
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.StateChanged"), TEXT("Destroy 提交前状态已变化"));
 		FU_BroadcastOperationFailure<Provider>(RootTicket->Kind);
 		return;
 	}
@@ -869,8 +924,8 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(
 		FU_ClearOperationWatchdog<Provider>();
         FU_ClearDestroyDelegate<Provider>();
         State.PendingOperation = EFU_PendingOperation::None;
-		FU_EmitOperationDiagnostic(
-			Provider, EFU_OperationKind::Destroy, OperationId,
+		FU_EmitDiagnostic<Provider>(
+			EFU_OperationKind::Destroy, OperationId,
 			EFU_OnlineDiagnosticPhase::Completed, EFU_OnlineDiagnosticSeverity::Warning,
 			TEXT("FU.Operation.SynchronousReject"), TEXT("DestroySession 同步返回 false；已按 generation 精确清理"));
 
@@ -946,6 +1001,13 @@ void UFU_OnlineSessionSubsystem::FU_OnDestroySessionComplete(
 	FU_ClearOperationWatchdog<Provider>();
 	FU_ClearDestroyDelegate<Provider>();
 	State.PendingOperation = EFU_PendingOperation::None;
+	FU_EmitDiagnostic<Provider>(
+		Machine.Get().RootKind,
+		Machine.Get().ActiveOperationId,
+		EFU_OnlineDiagnosticPhase::Callback,
+		bDestroyReachedNoSession ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning,
+		bDestroyReachedNoSession ? TEXT("FU.DestroySession.Completed") : TEXT("FU.DestroySession.Failed"),
+		bDestroyReachedNoSession ? TEXT("Destroy 回调确认命名会话已移除") : TEXT("Destroy 回调未能确认命名会话已移除"));
 
 	if (bWasRecovering)
 	{
@@ -1033,6 +1095,9 @@ void UFU_OnlineSessionSubsystem::FU_CreateSession(const int32 MaxPlayers, const 
 	//如果另一种Provider已经处于游戏会话中，要求先显式销毁
 	if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() != Provider)
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.ProviderConflict"),
+			TEXT("另一在线提供方仍有活动游戏会话；拒绝覆盖当前会话"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
@@ -1040,19 +1105,27 @@ void UFU_OnlineSessionSubsystem::FU_CreateSession(const int32 MaxPlayers, const 
 	//当前Provider正在执行其他异步操作时，不能覆盖它保存的数据和委托
 	if (Machine.Get().Phase != EFU_OperationPhase::Idle)
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.Busy"),
+			TEXT("当前 Provider 已有 OSS 操作在途；拒绝新的 Create 请求"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
 
 	if (!FFU_SessionRequestValidation::CanCreate(MaxPlayers, RoomName))
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.InvalidRequest"),
+			TEXT("创建请求的玩家数或房间名无效"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
 
 	// 【FU 修复：Runtime 自我保护】蓝图即使没有先检查状态，
 	// Steam 未登录、子系统缺失或驱动不可用时也不会进入 CreateSession 异步流程。
-	if (!FU_ValidateProviderReady<Provider>(TEXT("CreateSession")))
+	// 旧接线扫描锚点：FU_ValidateProviderReady<Provider>(TEXT("CreateSession"))；实际实现额外传入 Task 6 Ticket，
+	// 才能让预检拒绝使用入口已分配的 OperationId 而非重新生成身份。
+	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("CreateSession")))
 	{
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
@@ -1062,6 +1135,9 @@ void UFU_OnlineSessionSubsystem::FU_CreateSession(const int32 MaxPlayers, const 
 
 	if (!State.SessionInterface.IsValid())
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.Provider.SessionInterfaceUnavailable"),
+			TEXT("状态预检后无法取得 Session Interface"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
@@ -1102,6 +1178,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal(FFU_OperationTicket* R
     if (Machine.Get().Phase != EFU_OperationPhase::Idle)
     {
 		// 防御性 Busy 拒绝绝不能释放租约：该租约可能属于正在进行中的同 Provider 异步操作。
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.Busy"), TEXT("Create 续步时状态机仍处于 Busy"));
         OnCreateSessionCompleteV2.Broadcast(Provider, false);
         return;
     }
@@ -1115,6 +1193,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal(FFU_OperationTicket* R
 		State.PendingMaxPlayers = 0;
 		// 若这是销毁后的续步，Prepare 失败前可能仍持有同 Provider 的旧租约；强类型释放是安全 no-op 或回滚。
 		FU_RequestNetDriverLeaseRelease(Provider, TEXT("CreateSession NetDriver preparation failed"));
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.NetDriver.PreparationFailed"), TEXT("Create 前无法准备目标 NetDriver"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
@@ -1129,7 +1209,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal(FFU_OperationTicket* R
         State.PendingMaxPlayers = 0;
 		// 租约已在本函数前半段取得；同步前置失败不会产生回调，必须在这里主动归还。
 		FU_RequestNetDriverLeaseRelease(Provider, TEXT("CreateSession prerequisites unavailable"));
-
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.Operation.PrerequisitesUnavailable"), TEXT("Create 所需本地玩家或 Session Interface 不可用"));
         OnCreateSessionCompleteV2.Broadcast(Provider,false);
         return;
     }
@@ -1149,6 +1230,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal(FFU_OperationTicket* R
 	uint64 Generation = 0;
 	if (!FU_SubmitOperation<Provider>(*RootTicket, EFU_OperationKind::Create, Generation))
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.StateChanged"), TEXT("Create 提交前状态已变化"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
@@ -1169,8 +1252,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal(FFU_OperationTicket* R
 		const EFU_OperationAction Actions = Machine.HandleSynchronousReject(Generation);
 		FU_ClearOperationWatchdog<Provider>();
         FU_ClearCreateDelegate<Provider>();
-		FU_EmitOperationDiagnostic(
-			Provider, EFU_OperationKind::Create, OperationId,
+		FU_EmitDiagnostic<Provider>(
+			EFU_OperationKind::Create, OperationId,
 			EFU_OnlineDiagnosticPhase::Completed, EFU_OnlineDiagnosticSeverity::Warning,
 			TEXT("FU.Operation.SynchronousReject"), TEXT("CreateSession 同步返回 false；已按 generation 精确清理"));
 
@@ -1236,6 +1319,13 @@ void UFU_OnlineSessionSubsystem::FU_OnCreateSessionComplete(
 
 	if (!bWasRecovering)
 	{
+		FU_EmitDiagnostic<Provider>(
+			Machine.Get().RootKind,
+			Machine.Get().ActiveOperationId,
+			EFU_OnlineDiagnosticPhase::Callback,
+			bOverallSucceeded ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning,
+			bOverallSucceeded ? TEXT("FU.CreateSession.Completed") : TEXT("FU.CreateSession.Failed"),
+			bOverallSucceeded ? TEXT("Create 回调确认命名会话存在") : TEXT("Create 回调未能确认命名会话存在"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, bOverallSucceeded);
 	}
 
@@ -1258,6 +1348,8 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
     //同一个Provider不能同时创建、搜索、加入或销毁
     if (Machine.Get().Phase != EFU_OperationPhase::Idle)
     {
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.Busy"), TEXT("Find 请求被在途 OSS 操作拒绝"));
         OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
         return;
     }
@@ -1267,7 +1359,8 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
 	// 在这里提前拒绝 NotLoggedIn，可避免随后只得到含义模糊的异步 false 和空 Results。
 	// 搜索不会 Listen 或 ClientTravel，因此不能被另一 Provider 的进程级 NetDriver 租约阻止；
 	// Steam 身份、AppID 与 OSS Session Interface 等搜索环境仍由同一 Evaluator 检查。
-	if (!FU_ValidateProviderReady<Provider>(TEXT("FindSessions"), false))
+	// 旧接线扫描锚点：FU_ValidateProviderReady<Provider>(TEXT("FindSessions"), false)；Find 仍不要求传输租约。
+	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("FindSessions"), false))
 	{
 		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
 		return;
@@ -1279,6 +1372,8 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
 
     if (!State.SessionInterface.IsValid() || !PlayerController || !PlayerController->GetLocalPlayer() || MaxResults <= 0)
     {
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.Operation.PrerequisitesUnavailable"), TEXT("Find 所需接口、本地玩家或结果上限无效"));
         OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
         return;
     }
@@ -1301,6 +1396,8 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
 	uint64 Generation = 0;
 	if (!FU_SubmitOperation<Provider>(RootTicket, EFU_OperationKind::Find, Generation))
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.StateChanged"), TEXT("Find 提交前状态已变化"));
 		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
 		return;
 	}
@@ -1334,8 +1431,8 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
 		const EFU_OperationAction Actions = Machine.HandleSynchronousReject(Generation);
 		FU_ClearOperationWatchdog<Provider>();
         FU_ClearFindDelegate<Provider>();
-		FU_EmitOperationDiagnostic(
-			Provider, EFU_OperationKind::Find, OperationId,
+		FU_EmitDiagnostic<Provider>(
+			EFU_OperationKind::Find, OperationId,
 			EFU_OnlineDiagnosticPhase::Completed, EFU_OnlineDiagnosticSeverity::Warning,
 			TEXT("FU.Operation.SynchronousReject"), TEXT("FindSessions 同步返回 false；已按 generation 精确清理"));
 
@@ -1447,7 +1544,14 @@ void UFU_OnlineSessionSubsystem::FU_OnFindSessionsComplete(
 		RawResultCount,
 		BlueprintResults.Num());
 
-    //搜索成功但Results为空不是网络失败，而是当前没有匹配房间
+	//搜索成功但Results为空不是网络失败，而是当前没有匹配房间
+	FU_EmitDiagnostic<Provider>(
+		Machine.Get().RootKind,
+		Machine.Get().ActiveOperationId,
+		EFU_OnlineDiagnosticPhase::Callback,
+		bWasSuccessful ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning,
+		bWasSuccessful ? TEXT("FU.FindSessions.Completed") : TEXT("FU.FindSessions.Failed"),
+		FString::Printf(TEXT("Find 回调完成 Raw=%d Filtered=%d"), RawResultCount, BlueprintResults.Num()));
     OnFindSessionCompleteV2.Broadcast(Provider, BlueprintResults, bWasSuccessful);
 	
 
@@ -1472,6 +1576,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
     //一个GameInstance只能有一种活动游戏会话
     if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() != Provider)
     {
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.ProviderConflict"), TEXT("另一在线提供方仍有活动游戏会话；拒绝 Join"));
         OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::UnknownError);
         return;
     }
@@ -1479,13 +1585,16 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
     //防止加入请求覆盖该Provider正在执行的异步操作
 	if (Machine.Get().Phase != EFU_OperationPhase::Idle)
     {
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.Busy"), TEXT("Join 请求被在途 OSS 操作拒绝"));
         OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::UnknownError);
         return;
     }
 
 	// 【FU 修复：加入前重新验证环境】搜索完成到点击加入之间，Steam 可能掉线，
 	// NetDriver 也可能因地图状态改变而产生冲突；使用同一模板检查可以保留 Provider 类型信息。
-	if (!FU_ValidateProviderReady<Provider>(TEXT("JoinSession")))
+	// 旧接线扫描锚点：FU_ValidateProviderReady<Provider>(TEXT("JoinSession"))；额外 Ticket 参数保证拒绝可关联。
+	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("JoinSession")))
 	{
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::UnknownError);
 		return;
@@ -1495,6 +1604,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
 
     if (!State.SessionInterface.IsValid())
     {
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.Provider.SessionInterfaceUnavailable"), TEXT("Join 无法取得 Session Interface"));
         OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::UnknownError);
         return;
     }
@@ -1525,6 +1636,9 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
 
         if (FoundPassword != RoomPasswordInput)
         {
+			// 密码绝不写入诊断；只公开验证失败这一安全结论和本次入口的 OperationId。
+			FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+				EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.JoinSession.InvalidPassword"), TEXT("Join 密码验证失败"));
             OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::InvalidPassword);
             return;
         }
@@ -1536,6 +1650,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
 
     if (!bFoundSessionId || !State.PendingJoinResult.IsSet())
     {
+		FU_EmitDiagnostic<Provider>(RootTicket.Kind, RootTicket.OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.JoinSession.SessionNotFound"), TEXT("缓存搜索结果中不存在请求的会话"));
         OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::SessionDoesNotExist);
         return;
     }
@@ -1567,6 +1683,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal(FFU_OperationTicket* Roo
 	if (Machine.Get().Phase != EFU_OperationPhase::Idle)
 	{
 		// Busy 防御分支绝不能清 PendingJoinResult；它可能正被已提交 Join 的 OSS 调用引用。
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.Busy"), TEXT("Join 续步时状态机仍处于 Busy"));
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::UnknownError);
 		return;
 	}
@@ -1577,7 +1695,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal(FFU_OperationTicket* Roo
 	{
 		State.PendingJoinResult.Reset();
 		FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession prerequisites unavailable"));
-
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.Operation.PrerequisitesUnavailable"), TEXT("Join 所需本地玩家、Session Interface 或搜索结果不可用"));
 		OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::UnknownError);
 		return;
 	}
@@ -1588,6 +1707,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal(FFU_OperationTicket* Roo
 	{
 		State.PendingJoinResult.Reset();
 		FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession NetDriver preparation failed"));
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Error, TEXT("FU.NetDriver.PreparationFailed"), TEXT("Join 前无法准备目标 NetDriver"));
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::NetDriverUnavailable);
 		return;
 	}
@@ -1595,6 +1716,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal(FFU_OperationTicket* Roo
 	uint64 Generation = 0;
 	if (!FU_SubmitOperation<Provider>(*RootTicket, EFU_OperationKind::Join, Generation))
 	{
+		FU_EmitDiagnostic<Provider>(RootTicket->Kind, RootTicket->OperationId, EFU_OnlineDiagnosticPhase::Preflight,
+			EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Operation.Rejected.StateChanged"), TEXT("Join 提交前状态已变化"));
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::UnknownError);
 		return;
 	}
@@ -1615,8 +1738,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal(FFU_OperationTicket* Roo
 		const EFU_OperationAction Actions = Machine.HandleSynchronousReject(Generation);
 		FU_ClearOperationWatchdog<Provider>();
 		FU_ClearJoinDelegate<Provider>();
-		FU_EmitOperationDiagnostic(
-			Provider, EFU_OperationKind::Join, OperationId,
+		FU_EmitDiagnostic<Provider>(
+			EFU_OperationKind::Join, OperationId,
 			EFU_OnlineDiagnosticPhase::Completed, EFU_OnlineDiagnosticSeverity::Warning,
 			TEXT("FU.Operation.SynchronousReject"), TEXT("JoinSession 同步返回 false；已按 generation 精确清理"));
 		State.PendingJoinResult.Reset();
@@ -1741,6 +1864,14 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 	{
 		// 【FU 修复：明确 Success 的边界】这里只代表 ClientTravel 已启动，
 		// 真正的网络/地图失败会由 OnOnlineConnectionFailure 单独通知蓝图。
+		// 连接串和原始 Travel URL 不能进入诊断；仅记录已进入旅行阶段，再执行真实 ClientTravel。
+		FU_EmitDiagnostic<Provider>(
+			Machine.Get().RootKind,
+			Machine.Get().ActiveOperationId,
+			EFU_OnlineDiagnosticPhase::Callback,
+			EFU_OnlineDiagnosticSeverity::Info,
+			TEXT("FU.JoinSession.ClientTravelStarting"),
+			TEXT("Join 已解析地址并将开始 ClientTravel"));
 		PendingTravelController->ClientTravel(PendingConnectString, ETravelType::TRAVEL_Absolute);
 		ActiveGameplayProvider = Provider;
 	}
@@ -1752,6 +1883,13 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 
 	if (!bWasRecovering)
 	{
+		FU_EmitDiagnostic<Provider>(
+			Machine.Get().RootKind,
+			Machine.Get().ActiveOperationId,
+			EFU_OnlineDiagnosticPhase::Callback,
+			bOverallSucceeded ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning,
+			bOverallSucceeded ? TEXT("FU.JoinSession.Completed") : TEXT("FU.JoinSession.Failed"),
+			bOverallSucceeded ? TEXT("Join 回调已成功启动 ClientTravel") : TEXT("Join 回调未能完成会话或旅行前置"));
 		OnJoinSessionCompleteV2.Broadcast(Provider,BlueprintResult);
 	}
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy))
@@ -1779,8 +1917,7 @@ void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 		FU_ClearOperationWatchdog<Provider>();
 	}
 
-	FU_EmitOperationDiagnostic(
-		Provider,
+	FU_EmitDiagnostic<Provider>(
 		SubmittedKind,
 		OperationId,
 		EFU_OnlineDiagnosticPhase::Timeout,
@@ -1914,8 +2051,8 @@ bool UFU_OnlineSessionSubsystem::FU_TryRecoverProvider()
 	const FFU_OperationState Snapshot = Machine.Get();
 	if (Snapshot.Phase != EFU_OperationPhase::Recovering)
 	{
-		FU_EmitOperationDiagnostic(
-			Provider, Snapshot.RootKind, Snapshot.ActiveOperationId,
+		FU_EmitDiagnostic<Provider>(
+			Snapshot.RootKind, Snapshot.ActiveOperationId,
 			EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning,
 			TEXT("FU.Recovery.Rejected.NotRecovering"), TEXT("Provider 当前不在 Recovering，未执行任何恢复写操作"));
 		return false;
@@ -1923,8 +2060,8 @@ bool UFU_OnlineSessionSubsystem::FU_TryRecoverProvider()
 
 	if (!State.SessionInterface.IsValid())
 	{
-		FU_EmitOperationDiagnostic(
-			Provider, Snapshot.RootKind, Snapshot.ActiveOperationId,
+		FU_EmitDiagnostic<Provider>(
+			Snapshot.RootKind, Snapshot.ActiveOperationId,
 			EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Error,
 			TEXT("FU.Recovery.Rejected.InterfaceUnknown"), TEXT("Session Interface 不可用，无法证明 NoSession"));
 		return false;
@@ -1936,16 +2073,16 @@ bool UFU_OnlineSessionSubsystem::FU_TryRecoverProvider()
 	{
 		if (!bNoLiveOrPendingDriver)
 		{
-			FU_EmitOperationDiagnostic(
-				Provider, Snapshot.RootKind, Snapshot.ActiveOperationId,
+			FU_EmitDiagnostic<Provider>(
+				Snapshot.RootKind, Snapshot.ActiveOperationId,
 				EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning,
 				TEXT("FU.Recovery.Rejected.DriverActive"), TEXT("仍有活动或待定 GameNetDriver，拒绝重试恢复 Destroy"));
 			return false;
 		}
 
 		const bool bStarted = FU_StartRecoveryDestroy<Provider>(true);
-		FU_EmitOperationDiagnostic(
-			Provider, Snapshot.RootKind, Snapshot.ActiveOperationId,
+		FU_EmitDiagnostic<Provider>(
+			Snapshot.RootKind, Snapshot.ActiveOperationId,
 			EFU_OnlineDiagnosticPhase::Recovery,
 			bStarted ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Error,
 			bStarted ? TEXT("FU.Recovery.DestroySubmitted") : TEXT("FU.Recovery.DestroyRejected"),
@@ -1966,8 +2103,8 @@ bool UFU_OnlineSessionSubsystem::FU_TryRecoverProvider()
 		bNoLiveOrPendingDriver,
 		bLeaseReleased))
 	{
-		FU_EmitOperationDiagnostic(
-			Provider, Snapshot.RootKind, Snapshot.ActiveOperationId,
+		FU_EmitDiagnostic<Provider>(
+			Snapshot.RootKind, Snapshot.ActiveOperationId,
 			EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning,
 			TEXT("FU.Recovery.Rejected.Unsafe"),
 			FString::Printf(
@@ -1994,8 +2131,8 @@ bool UFU_OnlineSessionSubsystem::FU_TryRecoverProvider()
 		ActiveGameplayProvider.Reset();
 	}
 	const bool bFinished = Machine.FinishExplicitRecovery();
-	FU_EmitOperationDiagnostic(
-		Provider, Snapshot.RootKind, Snapshot.ActiveOperationId,
+	FU_EmitDiagnostic<Provider>(
+		Snapshot.RootKind, Snapshot.ActiveOperationId,
 		EFU_OnlineDiagnosticPhase::Completed,
 		bFinished ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Error,
 		bFinished ? TEXT("FU.Recovery.Completed") : TEXT("FU.Recovery.Rejected.StateChanged"),
@@ -2102,6 +2239,48 @@ bool UFU_OnlineSessionSubsystem::SaveDiagnosticReport(FString& OutSavedPath, FSt
 	return Diagnostics->SaveReport(OutSavedPath, OutError);
 }
 
+FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::RunProviderDiagnostics(const EFU_OnlineProvider Provider)
+{
+	// 【Task 7 Blueprint 同步诊断】状态检查保持既有只读行为；新建 GUID 只属于这次环境快照，
+	// 不触碰任何 Provider 的 attempt/generation，因而 ClearHistory 和并行在途 OSS 操作都不会被改写。
+	const FGuid OperationId = FGuid::NewGuid();
+	switch (Provider)
+	{
+	case EFU_OnlineProvider::Steam:
+	{
+		const FFU_OnlineProviderStatus Status = FU_CheckProviderStatus<EFU_OnlineProvider::Steam>();
+		FU_EmitEnvironmentDiagnostic<EFU_OnlineProvider::Steam>(OperationId, Status);
+		return Status;
+	}
+	case EFU_OnlineProvider::Lan:
+	{
+		const FFU_OnlineProviderStatus Status = FU_CheckProviderStatus<EFU_OnlineProvider::Lan>();
+		FU_EmitEnvironmentDiagnostic<EFU_OnlineProvider::Lan>(OperationId, Status);
+		return Status;
+	}
+	default:
+	{
+		// 非法 Blueprint 枚举不查询或污染任一真实 Provider；仍给 UI 一条无敏感数据的环境诊断。
+		FFU_OnlineProviderStatus Status;
+		Status.Provider = Provider;
+		Status.StatusCode = EFU_OnlineProviderStatusCode::SubsystemUnavailable;
+		Status.Message = TEXT("请求的在线提供方无效，未执行任何 OnlineSubsystem 查询");
+		FFU_OnlineDiagnosticEvent Event;
+		Event.OperationId = OperationId;
+		Event.Provider = Provider;
+		Event.Operation = EFU_OnlineDiagnosticOperation::Environment;
+		Event.Phase = EFU_OnlineDiagnosticPhase::Preflight;
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Provider.Invalid");
+		Event.Status = TEXT("Rejected");
+		Event.Message = Status.Message;
+		Event.RecommendedAction = TEXT("仅传入 Steam 或 Lan 枚举值后重新运行诊断");
+		FU_EmitDiagnostic(MoveTemp(Event));
+		return Status;
+	}
+	}
+}
+
 bool UFU_OnlineSessionSubsystem::TryRecoverProvider(const EFU_OnlineProvider Provider)
 {
 	// Blueprint 枚举只允许现有 Steam/LAN 序号；default 仍 fail-closed，且不触碰任一 Provider 状态。
@@ -2206,15 +2385,23 @@ void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Eve
 	Diagnostics->Emit(Event);
 }
 
-void UFU_OnlineSessionSubsystem::FU_EmitOperationDiagnostic(
-	const EFU_OnlineProvider Provider,
+template<EFU_OnlineProvider Provider>
+void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(
 	const EFU_OperationKind Kind,
 	const FGuid& OperationId,
 	const EFU_OnlineDiagnosticPhase Phase,
 	const EFU_OnlineDiagnosticSeverity Severity,
 	const TCHAR* Code,
-	const FString& Message)
+	const FString& Message,
+	const FString& RoomName)
 {
+	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
+	static_assert(
+		Provider == EFU_OnlineProvider::Steam || Provider == EFU_OnlineProvider::Lan,
+		"不受支持的 FU 在线提供商");
+
+	// 【Task 7 统一模板边界】Provider 从实例化模板及其 traits 派生，避免诊断事件再维护
+	// 一份运行时 Provider 真相；所有自由文本仍只在下层分发器一次性脱敏后才会离开 Runtime。
 	FFU_OnlineDiagnosticEvent Event;
 	Event.Provider = Provider;
 	Event.OperationId = OperationId;
@@ -2234,6 +2421,53 @@ void UFU_OnlineSessionSubsystem::FU_EmitOperationDiagnostic(
 	case EFU_OperationKind::Destroy: Event.Operation = EFU_OnlineDiagnosticOperation::DestroySession; break;
 	default: Event.Operation = EFU_OnlineDiagnosticOperation::Recovery; break;
 	}
+	FFU_OnlineDiagnosticField SubsystemField;
+	SubsystemField.Key = FName(TEXT("Subsystem"));
+	SubsystemField.Value = FProviderTraits::GetSubsystemName().ToString();
+	Event.Fields.Add(MoveTemp(SubsystemField));
+	if (!RoomName.IsEmpty())
+	{
+		// 房间名只帮助区分同名搜索/创建操作；密码、SessionId、连接串和 Travel URL 一律不进入事件。
+		FFU_OnlineDiagnosticField RoomField;
+		RoomField.Key = FName(TEXT("RoomName"));
+		RoomField.Value = RoomName;
+		Event.Fields.Add(MoveTemp(RoomField));
+	}
+	FU_EmitDiagnostic(MoveTemp(Event));
+}
+
+template<EFU_OnlineProvider Provider>
+void UFU_OnlineSessionSubsystem::FU_EmitEnvironmentDiagnostic(
+	const FGuid& OperationId,
+	const FFU_OnlineProviderStatus& Status)
+{
+	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
+	static_assert(
+		Provider == EFU_OnlineProvider::Steam || Provider == EFU_OnlineProvider::Lan,
+		"不受支持的 FU 在线提供商");
+
+	// 【Task 7 环境快照】该公开诊断不是 OSS 操作，不能借用或覆盖在途状态机的 ActiveOperationId；
+	// 但仍必须生成一次非零 ID，供 Blueprint 将单次检查的所有输出关联起来。
+	FFU_OnlineDiagnosticEvent Event;
+	Event.OperationId = OperationId;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::Environment;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Preflight;
+	Event.Severity = Status.bIsReady ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning;
+	Event.Code = FUOnlineSession::GetProviderStatusDiagnosticCode(Status.StatusCode);
+	Event.Status = Status.bIsReady ? TEXT("Ready") : TEXT("Rejected");
+	Event.Message = Status.Message;
+	Event.RecommendedAction = Status.bIsReady
+		? TEXT("环境已就绪；可继续调用对应的 Create、Find、Join 或 Destroy 蓝图入口")
+		: TEXT("根据 StatusCode 修复环境后重新运行 RunProviderDiagnostics");
+	FFU_OnlineDiagnosticField SubsystemField;
+	SubsystemField.Key = FName(TEXT("Subsystem"));
+	SubsystemField.Value = FProviderTraits::GetSubsystemName().ToString();
+	Event.Fields.Add(MoveTemp(SubsystemField));
+	FFU_OnlineDiagnosticField StatusField;
+	StatusField.Key = FName(TEXT("StatusCode"));
+	StatusField.Value = LexToString(static_cast<uint8>(Status.StatusCode));
+	Event.Fields.Add(MoveTemp(StatusField));
 	FU_EmitDiagnostic(MoveTemp(Event));
 }
 
@@ -2367,22 +2601,32 @@ void UFU_OnlineSessionSubsystem::Deinitialize()
 					TEXT("GameInstanceSubsystem deinitialize with OSS callback outstanding"));
 			}
 
-			FU_EmitOperationDiagnostic(
-				Provider, Operation.ActiveKind, Operation.ActiveOperationId,
-				EFU_OnlineDiagnosticPhase::Recovery,
-				bTerminalCallbackUnknown
-					? EFU_OnlineDiagnosticSeverity::Error
-					: EFU_OnlineDiagnosticSeverity::Warning,
-				bTerminalCallbackUnknown
-					? TEXT("FU.Operation.DeinitializeUncertain.RestartRequired")
-					: TEXT("FU.Operation.DeinitializeRecovering"),
-				bTerminalCallbackUnknown
-					? FString::Printf(
-						TEXT("Subsystem 析构时 OSS 终态未知 Generation=%llu；已阻断该 Provider 的租约释放与新 Owner 获取，必须重启进程"),
-						Operation.ActiveGeneration)
-					: FString::Printf(
-						TEXT("Subsystem 析构时操作仍处于 Recovering 但无原回调在途 Generation=%llu"),
-						Operation.ActiveGeneration));
+			const EFU_OnlineDiagnosticSeverity Severity = bTerminalCallbackUnknown
+				? EFU_OnlineDiagnosticSeverity::Error
+				: EFU_OnlineDiagnosticSeverity::Warning;
+			const TCHAR* Code = bTerminalCallbackUnknown
+				? TEXT("FU.Operation.DeinitializeUncertain.RestartRequired")
+				: TEXT("FU.Operation.DeinitializeRecovering");
+			const FString Message = bTerminalCallbackUnknown
+				? FString::Printf(
+					TEXT("Subsystem 析构时 OSS 终态未知 Generation=%llu；已阻断该 Provider 的租约释放与新 Owner 获取，必须重启进程"),
+					Operation.ActiveGeneration)
+				: FString::Printf(
+					TEXT("Subsystem 析构时操作仍处于 Recovering 但无原回调在途 Generation=%llu"),
+					Operation.ActiveGeneration);
+			// 析构路径的 Provider 是运行时参数；只在此最外层分派到两条 traits 模板边界，
+			// 不复制任何子系统/NetDriver/行为映射，且保留原操作 ID。
+			switch (Provider)
+			{
+			case EFU_OnlineProvider::Steam:
+				FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(Operation.ActiveKind, Operation.ActiveOperationId, EFU_OnlineDiagnosticPhase::Recovery, Severity, Code, Message);
+				break;
+			case EFU_OnlineProvider::Lan:
+				FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(Operation.ActiveKind, Operation.ActiveOperationId, EFU_OnlineDiagnosticPhase::Recovery, Severity, Code, Message);
+				break;
+			default:
+				break;
+			}
 		}
 	};
 	RegisterDeinitializeUncertainty(EFU_OnlineProvider::Steam, SteamState);

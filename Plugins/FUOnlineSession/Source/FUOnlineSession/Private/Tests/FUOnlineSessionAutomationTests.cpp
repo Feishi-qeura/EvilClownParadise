@@ -15,6 +15,68 @@
 #include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionOperationCorrelationTest,
+	"FUOnlineSession.Diagnostics.OperationCorrelation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionOperationCorrelationTest::RunTest(const FString& Parameters)
+{
+	// 【Task 7 RED：无 Subsystem 测试缝】用真实状态评估器构造 Steam 子系统缺失的 preflight，
+	// 再以 Task 6 状态机分配公开操作 ID。这里不创建 World、OSS 或网络请求，确保测试只锁住
+	// “预检拒绝必须先经统一诊断出口、再触发旧完成委托”的关联契约。
+	FFU_OnlineDiagnosticDispatchConfig Config;
+	Config.bEmitToLog = false;
+	Config.bEnableOverlay = false;
+	int32 LegacyFailureBroadcastCount = 0;
+	int32 BlueprintDiagnosticBroadcastCount = 0;
+	FFU_OnlineSessionDiagnostics Diagnostics(
+		Config,
+		[&BlueprintDiagnosticBroadcastCount](const FFU_OnlineDiagnosticEvent&)
+		{
+			++BlueprintDiagnosticBroadcastCount;
+		});
+
+	FFU_OnlineOperationStateMachine Machine;
+	const FFU_OperationTicket Ticket = Machine.BeginAttempt(EFU_OperationKind::Create);
+	FFU_OnlineProviderStatusInputs Inputs;
+	Inputs.bHasWorld = true;
+	Inputs.bHasSubsystem = false;
+	const EFU_OnlineProviderStatusCode StatusCode =
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs);
+	TestEqual(TEXT("测试缝确实得到 Steam 子系统不可用"), StatusCode, EFU_OnlineProviderStatusCode::SubsystemUnavailable);
+
+	// 【Task 7 GREEN 测试缝】真实模板预检使用相同的 Provider、根操作和 Ticket ID 构造事件；
+	// 先 Emit 再模拟既有完成委托，锁住 Blueprint 能在旧结果之前读取明确原因的时序。
+	if (StatusCode != EFU_OnlineProviderStatusCode::Ready)
+	{
+		FFU_OnlineDiagnosticEvent PreflightEvent;
+		PreflightEvent.OperationId = Ticket.OperationId;
+		PreflightEvent.Provider = EFU_OnlineProvider::Steam;
+		PreflightEvent.Operation = EFU_OnlineDiagnosticOperation::CreateSession;
+		PreflightEvent.Phase = EFU_OnlineDiagnosticPhase::Preflight;
+		PreflightEvent.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		PreflightEvent.Code = TEXT("FU.Provider.SubsystemUnavailable");
+		PreflightEvent.Status = TEXT("Rejected");
+		PreflightEvent.Message = TEXT("Steam OnlineSubsystem 不可用");
+		Diagnostics.Emit(PreflightEvent);
+		++LegacyFailureBroadcastCount;
+	}
+
+	const TArray<FFU_OnlineDiagnosticEvent> History = Diagnostics.GetHistory();
+	TestEqual(TEXT("预检拒绝先写入一条诊断历史"), History.Num(), 1);
+	TestEqual(TEXT("旧失败委托只在诊断事件之后触发一次"), LegacyFailureBroadcastCount, 1);
+	TestEqual(TEXT("诊断 Blueprint 出口恰好广播一次"), BlueprintDiagnosticBroadcastCount, 1);
+	if (History.Num() == 1)
+	{
+		TestEqual(TEXT("预检事件关联 Create"), History[0].Operation, EFU_OnlineDiagnosticOperation::CreateSession);
+		TestEqual(TEXT("预检事件关联 Steam"), History[0].Provider, EFU_OnlineProvider::Steam);
+		TestEqual(TEXT("预检事件使用稳定子系统不可用代码"), History[0].Code, FString(TEXT("FU.Provider.SubsystemUnavailable")));
+		TestTrue(TEXT("预检事件带有非零 OperationId"), History[0].OperationId.IsValid() && History[0].OperationId == Ticket.OperationId);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FFUOnlineSessionOperationStateMachineTest,
 	"FUOnlineSession.OperationStateMachine",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

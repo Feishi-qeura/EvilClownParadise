@@ -82,6 +82,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category="FUOnlineSession|Diagnostics")
 	bool SaveDiagnosticReport(FString& OutSavedPath, FString& OutError);
 
+	/**
+	 * 同步读取指定 Provider 的现有状态，并将一次已脱敏的环境快照广播到诊断历史。
+	 * 该入口不提交 OSS 请求、不改变任一在途操作的 generation 或 OperationId；返回值与状态查询完全一致。
+	 */
+	UFUNCTION(BlueprintCallable, Category="FU Online Session|Diagnostics")
+	FFU_OnlineProviderStatus RunProviderDiagnostics(EFU_OnlineProvider Provider);
+
 	//Steam蓝图入口:负责选择Provider，实现由template去做
 	/* Steam创建房间
 	 * 1.负责创建房间，是谁？ Steam的会话，在线子系统会走Steam Lobby
@@ -276,7 +283,11 @@ private:
 	 * 同步检查一次状态；失败时只写诊断日志并返回 false，不会启动任何 Session 异步任务。
 	 */
 	template<EFU_OnlineProvider Provider>
-	bool FU_ValidateProviderReady(const TCHAR* OperationName, bool bRequiresNetDriver = true) const;
+	bool FU_ValidateProviderReady(
+		EFU_OperationKind RootKind,
+		const FGuid& OperationId,
+		const TCHAR* OperationName,
+		bool bRequiresNetDriver = true);
 
 	/**
 	 * 【FU 修复：模板化传输选择】
@@ -409,14 +420,23 @@ private:
 	template<EFU_OnlineProvider Provider>
 	bool FU_TryRecoverProvider();
 
-	void FU_EmitOperationDiagnostic(
-		EFU_OnlineProvider Provider,
+	/**
+	 * 所有 Steam/LAN 操作事件的唯一模板化出口。Provider 只能由调用模板和 traits 决定，
+	 * 避免诊断层另建运行时映射表；RoomName 仅在确有排障价值时作为普通元数据传入。
+	 */
+	template<EFU_OnlineProvider Provider>
+	void FU_EmitDiagnostic(
 		EFU_OperationKind Kind,
 		const FGuid& OperationId,
 		EFU_OnlineDiagnosticPhase Phase,
 		EFU_OnlineDiagnosticSeverity Severity,
 		const TCHAR* Code,
-		const FString& Message);
+		const FString& Message,
+		const FString& RoomName = FString());
+
+	/** Provider 状态查询的环境事件同样只能由模板和 traits 决定 Provider。 */
+	template<EFU_OnlineProvider Provider>
+	void FU_EmitEnvironmentDiagnostic(const FGuid& OperationId, const FFU_OnlineProviderStatus& Status);
 
 	/** 为系统级失败补齐 World/PIE 上下文后进入统一诊断分发器。 */
 	void FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event);
