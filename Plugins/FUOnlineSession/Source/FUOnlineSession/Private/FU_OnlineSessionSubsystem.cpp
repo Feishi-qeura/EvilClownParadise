@@ -7,6 +7,7 @@
 #include "FU_SteamSocketsReadiness.h"
 #include "FUOnlineSessionModule.h"
 #include "Diagnostics/FU_OnlineSessionDiagnostics.h"
+#include "NetDriver/FU_OnlineSessionNetDriverLease.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/NetDriver.h"
@@ -91,6 +92,11 @@ namespace FUOnlineSession
 		case EFU_OnlineProviderStatusCode::ActiveNetDriverConflict:
 			return FString::Printf(
 				TEXT("当前 World 正在使用另一种 NetDriver；请先退出联网关卡，再切换到 %s"),
+				ProviderName);
+
+		case EFU_OnlineProviderStatusCode::NetDriverLeaseUnavailable:
+			return FString::Printf(
+				TEXT("%s 无法取得进程级 GameNetDriver 租约；请等待其他 PIE/旅行结束，若检测到外部修改则重启进程"),
 				ProviderName);
 
 		case EFU_OnlineProviderStatusCode::SteamAppIdBootstrapInvalid:
@@ -228,7 +234,8 @@ bool UFU_OnlineSessionSubsystem::FU_PrepareGameNetDriver()
 	}
 
 	// 已经开始 Listen 或已经连入服务器时，当前 World 的驱动不能热替换。
-	// 如果活动驱动本来就是目标类型，则允许同 Provider 的后续 Session 操作继续执行。
+	// 即使类型恰好一致也不能在这里直接成功：只有协调器确认“同 GameInstance/Provider 的既有租约”
+	// 才能幂等重入，否则全局定义可能已被第三方改写，下一次 Travel 仍会创建错误驱动。
 	if (UNetDriver* ActiveNetDriver = World->GetNetDriver())
 	{
 		if (!ActiveNetDriver->IsA(DesiredDriverClass))
@@ -242,42 +249,54 @@ bool UFU_OnlineSessionSubsystem::FU_PrepareGameNetDriver()
 				*DesiredDriverClassPath);
 			return false;
 		}
-
-		PreparedNetDriverProvider = Provider;
-		return true;
 	}
 
-	FNetDriverDefinition* GameNetDriverDefinition = FU_FindGameNetDriverDefinition();
-	if (!GameNetDriverDefinition)
+	UGameInstance* const LeaseOwner = GetGameInstance();
+	if (!LeaseOwner)
 	{
 		UE_LOG(
 			LogFUOnlineSession,
 			Error,
-			TEXT("[%s] 找不到 DefName=GameNetDriver 的引擎定义"),
+			TEXT("[%s] 无法准备 GameNetDriver：GameInstance 所有者不可用"),
 			FProviderTraits::GetDebugName());
 		return false;
 	}
 
-	GameNetDriverDefinition->DriverClassName = DesiredDriverClassName;
+	// 【进程级协调】真正的 GEngine 写入全部收口到租约；它会检查所有 PIE World、PendingNetGame、
+	// 唯一定义、所有权和五字段指纹，模板在这里仍只负责把 traits 选择的类名交给协调器。
+	const EFU_NetDriverLeaseResult LeaseResult = FFU_OnlineSessionNetDriverLease::Acquire(
+		*LeaseOwner,
+		Provider,
+		DesiredDriverClassName);
+	if (!FFU_OnlineSessionNetDriverLease::IsAcquireSuccess(LeaseResult))
+	{
+		UE_LOG(
+			LogFUOnlineSession,
+			Error,
+			TEXT("[%s] 无法取得 GameNetDriver 租约：Result=%s Target=%s"),
+			FProviderTraits::GetDebugName(),
+			FFU_OnlineSessionNetDriverLease::GetResultName(LeaseResult),
+			*DesiredDriverClassPath);
+		return false;
+	}
 
-	// Steam 不能静默回退到 IpNetDriver，否则 steam.<SteamId> 会再次被当作域名解析。
-	// LAN 的主驱动与回退驱动本来就是同一个 IpNetDriver，因此统一写成目标类型最安全。
-	GameNetDriverDefinition->DriverClassNameFallback = DesiredDriverClassName;
 	PreparedNetDriverProvider = Provider;
 
 	UE_LOG(
 		LogFUOnlineSession,
 		Display,
-		TEXT("[%s] 已准备 GameNetDriver：%s"),
+		TEXT("[%s] 已通过进程租约准备 GameNetDriver：%s（%s）"),
 		FProviderTraits::GetDebugName(),
-		*DesiredDriverClassPath);
+		*DesiredDriverClassPath,
+		FFU_OnlineSessionNetDriverLease::GetResultName(LeaseResult));
 
 	return true;
 }
 
 //运行时状态检测模板：只读取接口状态，不缓存接口，也不改变 Provider 的异步操作状态。
 template<EFU_OnlineProvider Provider>
-FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() const
+FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus(
+	const bool bRequiresNetDriver) const
 {
 	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
 
@@ -287,6 +306,7 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 	Result.RequiredNetDriverClass = FProviderTraits::GetNetDriverClassName();
 
 	FFU_OnlineProviderStatusInputs Inputs;
+	Inputs.bRequiresNetDriver = bRequiresNetDriver;
 	const UWorld* World = GetWorld();
 	Inputs.bHasWorld = World != nullptr;
 
@@ -294,14 +314,17 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 	Inputs.bShippingBuild = true;
 #endif
 
-	// Session 与 NetDriver 是两条不同依赖链；状态接口必须同时检查两者。
-	Inputs.bHasNetDriverDefinition = FU_FindGameNetDriverDefinition() != nullptr;
-	Result.bNetDriverDefinitionAvailable = Inputs.bHasNetDriverDefinition;
+	if (bRequiresNetDriver)
+	{
+		// Session 与 NetDriver 是两条不同依赖链；Create/Join 的完整状态必须同时检查两者。
+		Inputs.bHasNetDriverDefinition = FU_FindGameNetDriverDefinition() != nullptr;
+		Result.bNetDriverDefinitionAvailable = Inputs.bHasNetDriverDefinition;
 
-	// SteamSockets 模块在 Default 阶段加载；ResolveClass 只读取当前注册状态，不启动异步联网操作。
-	Inputs.bHasNetDriverClass =
-		FSoftClassPath(Result.RequiredNetDriverClass.ToString()).ResolveClass() != nullptr;
-	Result.bNetDriverClassAvailable = Inputs.bHasNetDriverClass;
+		// ResolveClass 只读取当前注册状态，不启动异步联网操作或触发软类加载。
+		Inputs.bHasNetDriverClass =
+			FSoftClassPath(Result.RequiredNetDriverClass.ToString()).ResolveClass() != nullptr;
+		Result.bNetDriverClassAvailable = Inputs.bHasNetDriverClass;
+	}
 
 	if constexpr (Provider == EFU_OnlineProvider::Steam)
 	{
@@ -312,17 +335,20 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 			RuntimeModule != nullptr && RuntimeModule->IsSteamAppIdBootstrapReady();
 		Result.bSteamAppIdBootstrapReady = Inputs.bSteamAppIdBootstrapReady;
 
-		// 【Steam 限域】只有 Steam 模板实例化这段探针；LAN 的纯状态检查不会加载 SteamSockets。
-		const FFU_SteamSocketsReadiness SteamSockets = FFU_SteamSocketsReadinessProbe::Probe();
-		Inputs.bSteamSocketsModuleAvailable = SteamSockets.bModuleAvailable;
-		Inputs.bSteamSocketsEnabled = SteamSockets.bModuleEnabled;
-		Inputs.bSteamSocketsSocketSubsystemAvailable = SteamSockets.bSocketSubsystemAvailable;
-		Result.bSteamSocketsModuleAvailable = Inputs.bSteamSocketsModuleAvailable;
-		Result.bSteamSocketsEnabled = Inputs.bSteamSocketsEnabled;
-		Result.bSteamSocketsSocketSubsystemAvailable = Inputs.bSteamSocketsSocketSubsystemAvailable;
+		if (bRequiresNetDriver)
+		{
+			// 【Steam 限域】Find 不需要也不加载传输模块；Create/Join 的 Steam 模板才执行真实探针。
+			const FFU_SteamSocketsReadiness SteamSockets = FFU_SteamSocketsReadinessProbe::Probe();
+			Inputs.bSteamSocketsModuleAvailable = SteamSockets.bModuleAvailable;
+			Inputs.bSteamSocketsEnabled = SteamSockets.bModuleEnabled;
+			Inputs.bSteamSocketsSocketSubsystemAvailable = SteamSockets.bSocketSubsystemAvailable;
+			Result.bSteamSocketsModuleAvailable = Inputs.bSteamSocketsModuleAvailable;
+			Result.bSteamSocketsEnabled = Inputs.bSteamSocketsEnabled;
+			Result.bSteamSocketsSocketSubsystemAvailable = Inputs.bSteamSocketsSocketSubsystemAvailable;
+		}
 	}
 
-	if (World)
+	if (bRequiresNetDriver && World)
 	{
 		if (const UNetDriver* ActiveNetDriver = World->GetNetDriver())
 		{
@@ -330,6 +356,27 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 			Inputs.bHasConflictingActiveNetDriver =
 				ActiveNetDriver->GetClass()->GetPathName() != Result.RequiredNetDriverClass.ToString();
 		}
+	}
+
+	if (bRequiresNetDriver)
+	{
+		// 一律由只读 Probe 判断：同 owner/provider 的既有租约可在活动驱动期间幂等复用，
+		// 仅仅“活动类名刚好相同”却没有租约时仍会拒绝，防止下一次 Travel 使用未知的全局定义。
+		const EFU_NetDriverLeaseResult LeaseProbeResult = FFU_OnlineSessionNetDriverLease::ProbeAcquire(
+			GetGameInstance(),
+			Provider,
+			Result.RequiredNetDriverClass);
+		Inputs.bNetDriverLeaseAvailable =
+			FFU_OnlineSessionNetDriverLease::IsProbeSuccess(LeaseProbeResult);
+		Result.bNetDriverLeaseAvailable = Inputs.bNetDriverLeaseAvailable;
+		Result.NetDriverLeaseStatus = FFU_OnlineSessionNetDriverLease::GetResultName(LeaseProbeResult);
+	}
+	else
+	{
+		// Find 不触碰传输层，明确标为 NotRequired；这样失败日志不会把“未采样”误读成租约故障。
+		Inputs.bNetDriverLeaseAvailable = true;
+		Result.bNetDriverLeaseAvailable = true;
+		Result.NetDriverLeaseStatus = TEXT("NotRequired");
 	}
 
 	IOnlineSubsystem* OnlineSubsystem = nullptr;
@@ -384,12 +431,18 @@ FFU_OnlineProviderStatus UFU_OnlineSessionSubsystem::FU_CheckProviderStatus() co
 	Result.StatusCode = FFU_OnlineProviderStatusEvaluator::Evaluate(Provider, Inputs);
 	Result.bIsReady = Result.StatusCode == EFU_OnlineProviderStatusCode::Ready;
 	Result.Message = FUOnlineSession::GetProviderStatusMessage(Provider, Result.StatusCode);
+	if (Result.StatusCode == EFU_OnlineProviderStatusCode::NetDriverLeaseUnavailable)
+	{
+		Result.Message += FString::Printf(TEXT("；LeaseResult=%s"), *Result.NetDriverLeaseStatus);
+	}
 
 	return Result;
 }
 
 template<EFU_OnlineProvider Provider>
-bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(const TCHAR* OperationName) const
+bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
+	const TCHAR* OperationName,
+	const bool bRequiresNetDriver) const
 {
 	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
 
@@ -400,7 +453,7 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(const TCHAR* Operation
 	// 【FU 修复：不能只依赖蓝图状态节点】
 	// 状态检查本身是同步、只读的：它不会登录 Steam、不会修改 ProviderState，
 	// 也不会注册异步委托。因此可以安全地放在每一个公开模板操作的入口处。
-	const FFU_OnlineProviderStatus Status = FU_CheckProviderStatus<Provider>();
+	const FFU_OnlineProviderStatus Status = FU_CheckProviderStatus<Provider>(bRequiresNetDriver);
 	if (Status.bIsReady)
 	{
 		return true;
@@ -411,12 +464,13 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(const TCHAR* Operation
 	UE_LOG(
 		LogFUOnlineSession,
 		Warning,
-		TEXT("[%s] 拒绝启动 %s：StatusCode=%d Subsystem=%s SessionInterface=%s "
-			 "IdentityInterface=%s LoggedIn=%s NetDriverDefinition=%s NetDriverClass=%s "
+		TEXT("[%s] 拒绝启动 %s：RequiresNetDriver=%s StatusCode=%d Subsystem=%s SessionInterface=%s "
+			 "IdentityInterface=%s LoggedIn=%s NetDriverDefinition=%s NetDriverClass=%s NetDriverLease=%s LeaseResult=%s "
 			 "SteamBootstrap=%s SteamSocketsModule=%s SteamSocketsEnabled=%s SteamSocketsSubsystem=%s AppIdMatches=%s "
 			 "RequiredNetDriver=%s ActiveNetDriver=%s Message=\"%s\""),
 		FProviderTraits::GetDebugName(),
 		OperationName ? OperationName : TEXT("OnlineOperation"),
+		bRequiresNetDriver ? TEXT("true") : TEXT("false"),
 		static_cast<int32>(Status.StatusCode),
 		Status.bSubsystemAvailable ? TEXT("true") : TEXT("false"),
 		Status.bSessionInterfaceAvailable ? TEXT("true") : TEXT("false"),
@@ -424,6 +478,8 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(const TCHAR* Operation
 		Status.bLoggedIn ? TEXT("true") : TEXT("false"),
 		Status.bNetDriverDefinitionAvailable ? TEXT("true") : TEXT("false"),
 		Status.bNetDriverClassAvailable ? TEXT("true") : TEXT("false"),
+		Status.bNetDriverLeaseAvailable ? TEXT("true") : TEXT("false"),
+		Status.NetDriverLeaseStatus.IsEmpty() ? TEXT("Unknown") : *Status.NetDriverLeaseStatus,
 		Status.bSteamAppIdBootstrapReady ? TEXT("true") : TEXT("false"),
 		Status.bSteamSocketsModuleAvailable ? TEXT("true") : TEXT("false"),
 		Status.bSteamSocketsEnabled ? TEXT("true") : TEXT("false"),
@@ -640,6 +696,8 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(const EFU_PendingOperation In
                 ActiveGameplayProvider.Reset();
             }
 
+			// 没有命名 Session 等价于显式销毁已经达到目标；租约也应随之归还。
+			FU_RequestNetDriverLeaseRelease(Provider, TEXT("Explicit DestroySession found no named session"));
             OnDestroySessionComplete.Broadcast(Provider, true);
         }
 
@@ -659,6 +717,18 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(const EFU_PendingOperation In
 
         FU_ClearDestroyDelegate<Provider>();
         State.PendingOperation = EFU_PendingOperation::None;
+
+		// 某些 Provider 可能同步移除本地命名 Session 却仍返回 false。只有接口有效且复查明确 NoSession
+		// 才允许清理活动来源并归还租约；接口失效或 Session 仍在时继续保守持租。
+		if (State.SessionInterface.IsValid()
+			&& State.SessionInterface->GetNamedSession(NAME_GameSession) == nullptr)
+		{
+			if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() == Provider)
+			{
+				ActiveGameplayProvider.Reset();
+			}
+			FU_RequestNetDriverLeaseRelease(Provider, TEXT("DestroySession rejected but named session is gone"));
+		}
 
         if (FailedOperation == EFU_PendingOperation::None)
         {
@@ -695,6 +765,17 @@ void UFU_OnlineSessionSubsystem::FU_OnDestroySessionComplete(FName SessionName,c
 
 	if (!bWasSuccessful)
 	{
+		// 失败回调同样以可验证的本地 Session 状态为准：NoSession 可安全回收，未知/仍存在则绝不猜测。
+		if (State.SessionInterface.IsValid()
+			&& State.SessionInterface->GetNamedSession(NAME_GameSession) == nullptr)
+		{
+			if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() == Provider)
+			{
+				ActiveGameplayProvider.Reset();
+			}
+			FU_RequestNetDriverLeaseRelease(Provider, TEXT("DestroySession callback failed but named session is gone"));
+		}
+
 		if (CompletedOperation == EFU_PendingOperation::None)
 		{
 			OnDestroySessionComplete.Broadcast(Provider, false);
@@ -736,6 +817,7 @@ void UFU_OnlineSessionSubsystem::FU_OnDestroySessionComplete(FName SessionName,c
 	else
 	{
 		//只有玩家显式销毁时才广播销毁完成
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("Explicit DestroySession completed"));
 		OnDestroySessionComplete.Broadcast(Provider, true);
 	}
 }
@@ -806,6 +888,7 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal()
     //销毁完成回调会先把状态恢复为Idle，然后才能继续创建
     if (State.OperationState != EFU_ProviderOperationState::Idle)
     {
+		// 防御性 Busy 拒绝绝不能释放租约：该租约可能属于正在进行中的同 Provider 异步操作。
         OnCreateSessionCompleteV2.Broadcast(Provider, false);
         return;
     }
@@ -817,6 +900,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal()
 		State.PendingCreateRoomName.Reset();
 		State.PendingCreateRoomPassword.Reset();
 		State.PendingMaxPlayers = 0;
+		// 若这是销毁后的续步，Prepare 失败前可能仍持有同 Provider 的旧租约；强类型释放是安全 no-op 或回滚。
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("CreateSession NetDriver preparation failed"));
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
 		return;
 	}
@@ -829,6 +914,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal()
         State.PendingCreateRoomName.Reset();
         State.PendingCreateRoomPassword.Reset();
         State.PendingMaxPlayers = 0;
+		// 租约已在本函数前半段取得；同步前置失败不会产生回调，必须在这里主动归还。
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("CreateSession prerequisites unavailable"));
 
         OnCreateSessionCompleteV2.Broadcast(Provider,false);
         return;
@@ -859,6 +946,8 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal()
         State.PendingCreateRoomName.Reset();
         State.PendingCreateRoomPassword.Reset();
         State.PendingMaxPlayers = 0;
+		// OSS 返回 false 表示不会再回调；保留租约会永久污染后续 Provider 选择。
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("CreateSession synchronous rejection"));
 
         OnCreateSessionCompleteV2.Broadcast(Provider, false);
     }
@@ -877,6 +966,11 @@ void UFU_OnlineSessionSubsystem::FU_OnCreateSessionComplete(FName SessionName, c
 	{
 		//只有创建真正成功后，才能记录活动游戏会话来源
 		ActiveGameplayProvider = Provider;
+	}
+	else
+	{
+		// 创建失败时不会产生 Listen NetDriver，立即/延迟恢复都由全进程安全扫描决定。
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("CreateSession callback failure"));
 	}
 
 	//无论成功还是失败，本次请求参数都已经完成使命
@@ -905,7 +999,9 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
 	// 【FU 修复：搜索前检查 Steam Identity】日志中的 FindSessions Started=true
 	// 只表示调用被接口接收，不代表 Steam 用户已经具备在线搜索资格。
 	// 在这里提前拒绝 NotLoggedIn，可避免随后只得到含义模糊的异步 false 和空 Results。
-	if (!FU_ValidateProviderReady<Provider>(TEXT("FindSessions")))
+	// 搜索不会 Listen 或 ClientTravel，因此不能被另一 Provider 的进程级 NetDriver 租约阻止；
+	// Steam 身份、AppID 与 OSS Session Interface 等搜索环境仍由同一 Evaluator 检查。
+	if (!FU_ValidateProviderReady<Provider>(TEXT("FindSessions"), false))
 	{
 		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
 		return;
@@ -1157,6 +1253,7 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal()
 	if (State.OperationState != EFU_ProviderOperationState::Idle)
 	{
 		State.PendingJoinResult.Reset();
+		// 与 Create 相同，Busy 只拒绝本次调用，不能干扰持有租约的在途操作。
 
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::UnknownError);
 		return;
@@ -1167,6 +1264,7 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal()
 	if (!State.SessionInterface.IsValid() || !PlayerController || !PlayerController->GetLocalPlayer() || !State.PendingJoinResult.IsSet())
 	{
 		State.PendingJoinResult.Reset();
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession prerequisites unavailable"));
 
 		OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::UnknownError);
 		return;
@@ -1177,6 +1275,7 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal()
 	if (!FU_PrepareGameNetDriver<Provider>())
 	{
 		State.PendingJoinResult.Reset();
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession NetDriver preparation failed"));
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::NetDriverUnavailable);
 		return;
 	}
@@ -1192,6 +1291,8 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal()
 	{
 		FU_ClearJoinDelegate<Provider>();
 		State.PendingJoinResult.Reset();
+		// 同步拒绝不会再触发 Join 回调，因此这里是本次租约唯一可靠的归还点。
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession synchronous rejection"));
 
 		OnJoinSessionCompleteV2.Broadcast(Provider,EFU_JoinSessionResult::UnknownError);
 	}
@@ -1212,9 +1313,6 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(FName SessionName,cons
     {
     case EOnJoinSessionCompleteResult::Success:
     {
-        //引擎已经成功加入命名Session，因此记录实际所属Provider
-        ActiveGameplayProvider = Provider;
-
         if (!State.SessionInterface.IsValid())
         {
             BlueprintResult = EFU_JoinSessionResult::UnknownError;
@@ -1245,9 +1343,11 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(FName SessionName,cons
         }
 
         // 【FU 修复：明确 Success 的边界】这里只代表 ClientTravel 已启动，
-		// 真正的网络/地图失败会由 OnOnlineConnectionFailure 单独通知蓝图。
+        // 真正的网络/地图失败会由 OnOnlineConnectionFailure 单独通知蓝图。
         PlayerController->ClientTravel(ConnectString,ETravelType::TRAVEL_Absolute);
 
+		// 只有连接地址、控制器和 ClientTravel 均已就绪时，才把该 Provider 标记为活动游戏会话。
+		ActiveGameplayProvider = Provider;
         BlueprintResult = EFU_JoinSessionResult::Success;
         break;
     }
@@ -1279,6 +1379,12 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(FName SessionName,cons
 
     //加入请求已结束，原始待加入结果不再需要
     State.PendingJoinResult.Reset();
+
+	if (BlueprintResult != EFU_JoinSessionResult::Success)
+	{
+		// 包括 OSS 成功但地址/控制器失败的路径；没有启动 ClientTravel 就不应继续占用全局定义。
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession callback failure"));
+	}
 
     OnJoinSessionCompleteV2.Broadcast(Provider,BlueprintResult);
 }
@@ -1386,6 +1492,19 @@ TOptional<EFU_OnlineProvider> UFU_OnlineSessionSubsystem::FU_GetFailureProvider(
 	return PreparedNetDriverProvider;
 }
 
+void UFU_OnlineSessionSubsystem::FU_RequestNetDriverLeaseRelease(
+	const EFU_OnlineProvider Provider,
+	const TCHAR* Reason)
+{
+	// GameInstanceSubsystem 正常析构期间 GetGameInstance 仍有效；若已经失效，nullptr 只允许协调器
+	// 释放同样已经失效的弱所有者；Provider 也必须一致，错误调用 DestroyLan 不会释放 Steam 租约。
+	FFU_OnlineSessionNetDriverLease::RequestRelease(GetGameInstance(), Provider, Reason);
+	if (PreparedNetDriverProvider.IsSet() && PreparedNetDriverProvider.GetValue() == Provider)
+	{
+		PreparedNetDriverProvider.Reset();
+	}
+}
+
 void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event)
 {
 	if (!Diagnostics.IsValid())
@@ -1460,6 +1579,9 @@ void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 	DiagnosticEvent.Fields.Add(MoveTemp(NetDriverField));
 	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
 
+	// 失败回调触发时驱动可能仍在 WorldContext 中；RequestRelease 会先标记，再由 ticker 等待安全窗口。
+	FU_RequestNetDriverLeaseRelease(Provider.GetValue(), TEXT("Network failure"));
+
 	OnOnlineConnectionFailure.Broadcast(
 		Provider.GetValue(),
 		EFU_OnlineConnectionFailureType::NetworkFailure,
@@ -1506,6 +1628,9 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 	DiagnosticEvent.Fields.Add(MoveTemp(FailureTypeField));
 	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
 
+	// Travel 失败可能留下 PendingNetGame；租约协调器会将恢复延迟到所有 World 同时清空。
+	FU_RequestNetDriverLeaseRelease(Provider.GetValue(), TEXT("Travel failure"));
+
 	OnOnlineConnectionFailure.Broadcast(
 		Provider.GetValue(),
 		EFU_OnlineConnectionFailureType::TravelFailure,
@@ -1514,6 +1639,14 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 
 void UFU_OnlineSessionSubsystem::Deinitialize()
 {
+	// 必须在 GameInstance 弱所有者失效之前交还租约；若 World 尚有驱动，协调器会安全地延迟恢复。
+	if (PreparedNetDriverProvider.IsSet())
+	{
+		FU_RequestNetDriverLeaseRelease(
+			PreparedNetDriverProvider.GetValue(),
+			TEXT("GameInstanceSubsystem deinitialize"));
+	}
+
 	// 先撤销精确添加的 Slate Widget，再释放分发器，避免 Viewport 在 GameInstance 析构后持有失效引用。
 	if (Diagnostics.IsValid())
 	{

@@ -25,6 +25,11 @@ public:
 	virtual ~FFUOnlineSessionModule() override;
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
+	/**
+	 * 租约与 Poisoned 标志必须覆盖整个进程生命周期；热卸载会丢失 DLL 静态状态，却可能留下仍被 World
+	 * 使用的已安装 GameNetDriver。禁止动态重载可确保禁用插件通过安全的编辑器重启完成配置恢复。
+	 */
+	virtual bool SupportsDynamicReloading() override;
 
 	/**
 	 * 状态检查只读取 Runtime 模块持有的 Bootstrap ticket。

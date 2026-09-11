@@ -95,7 +95,11 @@ enum class EFU_OnlineProviderStatusCode : uint8
 	ShippingSteamAppIdMissing UMETA(DisplayName = "Shipping Steam AppID Missing"),
 
 	//运行中 OnlineSubsystem 的 AppID 与开发或 Shipping 配置期望不一致
-	SteamAppIdMismatch UMETA(DisplayName = "Steam AppID Mismatch")
+	SteamAppIdMismatch UMETA(DisplayName = "Steam AppID Mismatch"),
+
+	//进程级 GameNetDriver 正被其他 GameInstance/Provider 占用，或完整恢复指纹已被外部修改
+	//【兼容性】新增值刻意追加在枚举末尾，避免改变既有 Blueprint 资产保存的 ordinal。
+	NetDriverLeaseUnavailable UMETA(DisplayName = "NetDriver Lease Unavailable")
 };
 
 /**
@@ -186,6 +190,16 @@ struct FUONLINESESSION_API FFU_OnlineProviderStatus
 
 	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
 	bool bSteamAppIdMatchesExpectation = false;
+
+	// 【Blueprint 兼容】Task 5 新字段只追加在结构末尾，避免打乱既有 Make/Break 节点的 pin 顺序。
+	// 进程级租约是否允许当前 GameInstance/Provider 安全准备驱动；false 时不会改写 GEngine。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	bool bNetDriverLeaseAvailable = false;
+
+	// 精确的租约探针结果名（例如 GameNetDriverDuplicate、ActiveOrPendingDriver、ExternallyModified），
+	// Blueprint 可直接展示/写入工单，而不必把所有失败都猜成同一个通用状态。
+	UPROPERTY(BlueprintReadOnly, Category="FUOnlineSession|Online Session|Provider Status")
+	FString NetDriverLeaseStatus;
 };
 
 /** Blueprint-safe snapshot of a discovered online session. */

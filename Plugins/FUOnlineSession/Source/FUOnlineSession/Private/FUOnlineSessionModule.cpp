@@ -2,6 +2,7 @@
 
 #include "FU_SteamAppIdBootstrap.h"
 #include "FU_OnlineSessionSettings.h"
+#include "NetDriver/FU_OnlineSessionNetDriverLease.h"
 #include "Modules/ModuleManager.h"
 
 DEFINE_LOG_CATEGORY(LogFUOnlineSession);
@@ -25,12 +26,21 @@ void FFUOnlineSessionModule::StartupModule()
 
 void FFUOnlineSessionModule::ShutdownModule()
 {
+	// 先撤销进程级租约 ticker 并做最后一次指纹安全恢复，避免模块卸载后仍回调已卸载代码。
+	FFU_OnlineSessionNetDriverLease::ShutdownModule();
+
 	// 【禁用/卸载恢复】只撤销本模块添加的虚拟层，项目和插件磁盘配置均保持原状。
 	if (SteamAppIdBootstrap.IsValid())
 	{
 		SteamAppIdBootstrap->Shutdown();
 		SteamAppIdBootstrap.Reset();
 	}
+}
+
+bool FFUOnlineSessionModule::SupportsDynamicReloading()
+{
+	// 返回 false 是进程级租约的生命周期契约，不是构建限制；普通项目启动、打包与进程退出均不受影响。
+	return false;
 }
 
 bool FFUOnlineSessionModule::IsSteamAppIdBootstrapReady() const

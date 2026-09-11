@@ -261,7 +261,7 @@ private:
 
 	//与创建/搜索模板相同：蓝图入口分开，状态检测核心通过 Provider 在编译期选择实现。
 	template<EFU_OnlineProvider Provider>
-	FFU_OnlineProviderStatus FU_CheckProviderStatus() const;
+	FFU_OnlineProviderStatus FU_CheckProviderStatus(bool bRequiresNetDriver = true) const;
 
 	/**
 	 * 【FU 修复：异步操作的统一准入门】
@@ -270,7 +270,7 @@ private:
 	 * 同步检查一次状态；失败时只写诊断日志并返回 false，不会启动任何 Session 异步任务。
 	 */
 	template<EFU_OnlineProvider Provider>
-	bool FU_ValidateProviderReady(const TCHAR* OperationName) const;
+	bool FU_ValidateProviderReady(const TCHAR* OperationName, bool bRequiresNetDriver = true) const;
 
 	/**
 	 * 【FU 修复：模板化传输选择】
@@ -353,6 +353,12 @@ private:
 
 	//旅行失败时优先使用活动 Provider，否则使用最近准备过驱动的 Provider。
 	TOptional<EFU_OnlineProvider> FU_GetFailureProvider() const;
+
+	/**
+	 * 统一请求释放本 GameInstance 持有的进程级 NetDriver 租约。
+	 * 协调器会在任一 World 仍有驱动或 PendingNetGame 时延迟恢复，因此调用方不需要冒险强改 GEngine。
+	 */
+	void FU_RequestNetDriverLeaseRelease(EFU_OnlineProvider Provider, const TCHAR* Reason);
 
 	/** 为系统级失败补齐 World/PIE 上下文后进入统一诊断分发器。 */
 	void FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event);

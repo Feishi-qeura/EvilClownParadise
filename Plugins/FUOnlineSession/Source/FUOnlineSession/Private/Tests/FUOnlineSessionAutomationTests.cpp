@@ -9,10 +9,178 @@
 #include "FU_OnlineSessionRequestValidation.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
 #include "FU_SteamAppIdBootstrap.h"
+#include "NetDriver/FU_OnlineSessionNetDriverLease.h"
 #include "FU_CheckSessionStatusAsync.h"
 #include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFUOnlineSessionDefaultResultTest,"FUOnlineSession.Types.DefaultResult",EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionNetDriverLeaseTest,
+	"FUOnlineSession.NetDriverLease.Snapshots",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionNetDriverLeaseTest::RunTest(const FString& Parameters)
+{
+	// 【先写租约契约】真正的 GEngine 数组由协调器读取；这里用纯快照锁住所有危险分支，
+	// 防止未来改动让正在旅行的 World 或第三方修改过的定义被 FU 覆盖。
+	FFU_NetDriverLeasePreflight Snapshot;
+	TestEqual(
+		TEXT("非游戏线程绝不读取或修改进程级租约"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::NotGameThread);
+
+	Snapshot.bIsGameThread = true;
+	TestEqual(
+		TEXT("缺少 GameNetDriver 定义时不自行插入"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::GameNetDriverMissing);
+
+	Snapshot.GameNetDriverDefinitionCount = 2;
+	TestEqual(
+		TEXT("重复 GameNetDriver 定义时不猜测目标"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::GameNetDriverDuplicate);
+
+	Snapshot.GameNetDriverDefinitionCount = 1;
+	Snapshot.bHasLiveTargetNamedDriver = true;
+	TestEqual(
+		TEXT("任意活动 GameNetDriver 都阻止首租"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::ActiveOrPendingDriver);
+
+	Snapshot.bHasLiveTargetNamedDriver = false;
+	Snapshot.bHasPendingNetGame = true;
+	TestEqual(
+		TEXT("即使 PendingNetGame 尚未创建驱动也阻止首租"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::ActiveOrPendingDriver);
+
+	Snapshot.bHasPendingNetGame = false;
+	Snapshot.bHasPendingTravel = true;
+	TestEqual(
+		TEXT("TravelURL 已排队但尚无 PendingNetGame 时也阻止首租"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::ActiveOrPendingDriver);
+
+	Snapshot.bHasPendingTravel = false;
+	Snapshot.bLeaseExists = true;
+	Snapshot.bSameOwner = true;
+	Snapshot.bSameProvider = true;
+	Snapshot.bInstalledValueStillMatches = true;
+	TestEqual(
+		TEXT("同一 GameInstance 和 Provider 的完整租约可幂等复用"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::AlreadyOwned);
+
+	Snapshot.bInstalledValueStillMatches = false;
+	TestEqual(
+		TEXT("既有租约安装值变化优先判为外部修改"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::ExternallyModified);
+	Snapshot.bInstalledValueStillMatches = true;
+
+	Snapshot.bSameOwner = false;
+	TestEqual(
+		TEXT("另一 GameInstance 不能复用进程级租约"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::OwnedByAnotherGameInstance);
+
+	Snapshot.bLeaseOwnerExpired = true;
+	TestEqual(
+		TEXT("失效旧 Owner 且所有 World 安全时允许先恢复基线再重租"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::StaleOwnerReclaimable);
+	Snapshot.bHasPendingTravel = true;
+	TestEqual(
+		TEXT("失效旧 Owner 也不能越过已排队 Travel 强制回收"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::ActiveOrPendingDriver);
+	Snapshot.bHasPendingTravel = false;
+	Snapshot.bLeaseOwnerExpired = false;
+	Snapshot.bSameOwner = true;
+
+	Snapshot.bSameDesiredDriver = false;
+	TestEqual(
+		TEXT("同 Provider 重租也必须要求本次目标类名与已安装值一致"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::DesiredDriverMismatch);
+	Snapshot.bSameDesiredDriver = true;
+
+	Snapshot.bSameProvider = false;
+	TestEqual(
+		TEXT("同一实例不能在已租约期间切换 Provider"),
+		FFU_OnlineSessionNetDriverLease::EvaluateAcquire(Snapshot),
+		EFU_NetDriverLeaseResult::ProviderSwitchBlocked);
+
+	FNetDriverDefinition Definition;
+	Definition.DefName = NAME_GameNetDriver;
+	Definition.DriverClassName = FName(TEXT("/Script/OnlineSubsystemUtils.IpNetDriver"));
+	Definition.DriverClassNameFallback = Definition.DriverClassName;
+	Definition.MaxChannelsOverride = 77;
+	Definition.bRunParallelConnectionTick = true;
+	const FName SteamDriverClass(TEXT("/Script/SteamSockets.SteamSocketsNetDriver"));
+	const FFU_NetDriverDefinitionValue OriginalValue =
+		FFU_NetDriverDefinitionValue::FromDefinition(Definition);
+	const FFU_NetDriverDefinitionValue InstalledValue =
+		FFU_OnlineSessionNetDriverLease::BuildInstalledValue(OriginalValue, SteamDriverClass);
+
+	// 【最小写入契约】元编程 traits 只选择两个类名；租约不得顺手改写定义名、通道数或并行 Tick。
+	TestEqual(TEXT("安装值使用目标主驱动"), InstalledValue.DriverClassName, SteamDriverClass);
+	TestEqual(TEXT("安装值禁用静默异类回退"), InstalledValue.DriverClassNameFallback, SteamDriverClass);
+	TestEqual(TEXT("安装保留 DefName"), InstalledValue.DefName, OriginalValue.DefName);
+	TestEqual(TEXT("安装保留 MaxChannelsOverride"), InstalledValue.MaxChannelsOverride, 77);
+	TestTrue(TEXT("安装保留 bRunParallelConnectionTick"), InstalledValue.bRunParallelConnectionTick);
+
+	FFU_NetDriverLeaseFingerprint Expected;
+	Expected.DefinitionPointer = &Definition;
+	Expected.DefinitionIndex = 0;
+	Expected.DefinitionArrayNum = 2;
+	Expected.OrderedDefinitionNames = { NAME_GameNetDriver, FName(TEXT("BeaconNetDriver")) };
+	Expected.OriginalValue = OriginalValue;
+	Expected.InstalledValue = InstalledValue;
+
+	FFU_NetDriverLeaseFingerprint ExternallyChanged = Expected;
+	ExternallyChanged.OrderedDefinitionNames = { FName(TEXT("BeaconNetDriver")), NAME_GameNetDriver };
+	TestEqual(
+		TEXT("定义顺序指纹变化视为外部修改，绝不恢复覆盖"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, ExternallyChanged, true),
+		EFU_NetDriverLeaseResult::ExternallyModified);
+	TestEqual(
+		TEXT("即使 World 尚活动，外部指纹变化也必须立即毒化而非无限延迟"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, ExternallyChanged, false),
+		EFU_NetDriverLeaseResult::ExternallyModified);
+
+	ExternallyChanged = Expected;
+	++ExternallyChanged.InstalledValue.MaxChannelsOverride;
+	TestEqual(
+		TEXT("租约期间任一非驱动字段变化也视为外部修改"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, ExternallyChanged, true),
+		EFU_NetDriverLeaseResult::ExternallyModified);
+
+	ExternallyChanged = Expected;
+	ExternallyChanged.DefinitionPointer = nullptr;
+	TestEqual(
+		TEXT("元素指针变化时绝不按旧索引恢复"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, ExternallyChanged, true),
+		EFU_NetDriverLeaseResult::ExternallyModified);
+
+	ExternallyChanged = Expected;
+	++ExternallyChanged.DefinitionArrayNum;
+	TestEqual(
+		TEXT("数组长度变化时绝不覆盖第三方结构"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, ExternallyChanged, true),
+		EFU_NetDriverLeaseResult::ExternallyModified);
+	TestEqual(
+		TEXT("仍有 World 驱动时只能延迟恢复"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, Expected, false),
+		EFU_NetDriverLeaseResult::ReleaseDeferred);
+	TestEqual(
+		TEXT("所有 World 清空且完整指纹一致时才能恢复"),
+		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, Expected, true),
+		EFU_NetDriverLeaseResult::Restored);
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FFUOnlineSessionDiagnosticHistoryTest,
@@ -320,7 +488,27 @@ bool FFUOnlineSessionProviderNetDriverStatusTest::RunTest(const FString& Paramet
 		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
 		EFU_OnlineProviderStatusCode::ActiveNetDriverConflict);
 
+	// 【能力分离】Find 不会创建/旅行 NetDriver；即使另一 Provider 正占租，也必须能搜索两套房间列表。
+	Inputs.bRequiresNetDriver = false;
+	Inputs.bHasNetDriverDefinition = false;
+	Inputs.bHasNetDriverClass = false;
+	Inputs.bNetDriverLeaseAvailable = false;
+	TestEqual(
+		TEXT("搜索能力忽略无关的 NetDriver 与租约互斥"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::Ready);
+
+	Inputs.bRequiresNetDriver = true;
+	Inputs.bHasNetDriverDefinition = true;
+	Inputs.bHasNetDriverClass = true;
 	Inputs.bHasConflictingActiveNetDriver = false;
+	Inputs.bNetDriverLeaseAvailable = false;
+	TestEqual(
+		TEXT("全进程租约冲突必须在实际改写 GEngine 前阻止 Provider"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::NetDriverLeaseUnavailable);
+
+	Inputs.bNetDriverLeaseAvailable = true;
 	Inputs.bHasNetDriverDefinition = false;
 	TestEqual(
 		TEXT("缺少 GameNetDriver Definition 时返回明确状态"),
@@ -421,6 +609,12 @@ bool FFUOnlineSessionSteamSocketsStatusTest::RunTest(const FString& Parameters)
 		TEXT("缺少 SteamSockets 模块必须阻止 Steam"),
 		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
 		EFU_OnlineProviderStatusCode::SteamSocketsModuleUnavailable);
+	Inputs.bRequiresNetDriver = false;
+	TestEqual(
+		TEXT("Steam Lobby 搜索不依赖尚未使用的 SteamSockets 传输层"),
+		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs),
+		EFU_OnlineProviderStatusCode::Ready);
+	Inputs.bRequiresNetDriver = true;
 	TestEqual(
 		TEXT("SteamSockets outage does not block LAN"),
 		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Lan, Inputs),
