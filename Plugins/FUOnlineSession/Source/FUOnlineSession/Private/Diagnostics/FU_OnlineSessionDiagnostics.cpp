@@ -487,6 +487,125 @@ TOptional<FFU_OnlineDiagnosticEvent> FFU_OnlineSessionDiagnostics::BuildUnsuppor
 	return Event;
 }
 
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+	const EFU_OnlineProvider Provider,
+	const EFU_OnlineDiagnosticOperation Operation,
+	const FGuid& OperationId,
+	const bool bSucceeded,
+	const EFU_OperationAction Actions)
+{
+	// 【A1 安全事件】只从已验证的 operation、布尔终态和状态机 action 派生有限结果；
+	// 不接收 SessionId、连接串、密码或 OSS 原始错误，因而不会把敏感数据带进统一输出。
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = Operation;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = bSucceeded ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning;
+	const TCHAR* OperationStem = Operation == EFU_OnlineDiagnosticOperation::CreateSession
+		? TEXT("FU.CreateSession.Recovery")
+		: Operation == EFU_OnlineDiagnosticOperation::JoinSession
+			? TEXT("FU.JoinSession.Recovery")
+			: TEXT("FU.Operation.Recovery");
+	Event.Code = FString::Printf(
+		TEXT("%s.%s"),
+		OperationStem,
+		bSucceeded ? TEXT("LateCallbackSucceeded") : TEXT("LateCallbackFailed"));
+	const bool bRecoveryDestroyRequested = EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy);
+	Event.Status = bRecoveryDestroyRequested
+		? TEXT("RecoveryDestroyRequested")
+		: TEXT("RecoveryDestroyNotRequested");
+	Event.Message = bRecoveryDestroyRequested
+		? TEXT("迟到回调已由状态机接收；根请求保持已完成失败，并请求补偿 Destroy")
+		: TEXT("迟到回调已由状态机接收；根请求保持已完成失败，未请求补偿 Destroy");
+	Event.RecommendedAction = TEXT("等待恢复 Destroy、租约和全 World 安全条件收敛；不得再次发出旧完成事件或旅行");
+	return Event;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildRecoveringFindOriginal(
+	const EFU_OnlineProvider Provider,
+	const FGuid& OperationId,
+	const bool bSucceeded,
+	const EFU_OperationAction Actions)
+{
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::FindSessions;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = bSucceeded ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning;
+	const bool bOriginalWonCancelRace =
+		EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate);
+	Event.Code = bOriginalWonCancelRace
+		? TEXT("FU.FindSessions.Recovery.OriginalWonCancelRace")
+		: TEXT("FU.FindSessions.Recovery.OriginalCompletedAfterCancelRequest");
+	Event.Status = bSucceeded ? TEXT("Succeeded") : TEXT("Failed");
+	Event.Message = bOriginalWonCancelRace
+		? TEXT("原 Find 回调先于取消完成到达；状态机已决定同时清理原 Find 与取消委托")
+		: TEXT("取消请求未终止原 Find；原 Find 回调现已到达并由状态机决定精确清理");
+	Event.RecommendedAction = TEXT("该超时根请求已经完成失败；仅等待内部资源清理，不得再次广播搜索结果");
+	return Event;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+	const EFU_OnlineProvider Provider,
+	const FGuid& OperationId,
+	const EFU_FindCancellationDiagnosticOutcome Outcome)
+{
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::FindSessions;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = EFU_OnlineDiagnosticSeverity::Info;
+	Event.RecommendedAction = TEXT("保持原 Find completion 为唯一内部终点，直到状态机确认取消或原回调获胜");
+
+	// 每个分支只输出固定有限词汇；默认分支也不回显未知枚举数值，避免诊断本身扩大输入面。
+	switch (Outcome)
+	{
+	case EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.FindSessions.Cancel.InterfaceUnavailable");
+		Event.Status = TEXT("WaitingForOriginal");
+		Event.Message = TEXT("Find 超时后 Session Interface 已不可用；取消无法提交，继续等待原 Find 回调");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::DelegateBound:
+		Event.Code = TEXT("FU.FindSessions.Cancel.DelegateBound");
+		Event.Status = TEXT("Pending");
+		Event.Message = TEXT("已为同一 generation 绑定 CancelFindSessions 完成委托");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::RequestSubmitted:
+		Event.Code = TEXT("FU.FindSessions.Cancel.RequestSubmitted");
+		Event.Status = TEXT("Pending");
+		Event.Message = TEXT("CancelFindSessions 请求已由接口接收，等待取消与原 Find 的竞争终态");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::SynchronousRejected:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.FindSessions.Cancel.SynchronousRejected");
+		Event.Status = TEXT("WaitingForOriginal");
+		Event.Message = TEXT("CancelFindSessions 同步返回 false；仅清取消委托并继续等待原 Find 回调");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::CancelWonRace:
+		Event.Code = TEXT("FU.FindSessions.Cancel.Completed");
+		Event.Status = TEXT("CancelWonRace");
+		Event.Message = TEXT("取消完成成功并赢得竞争；状态机已授权清理原 Find、取消委托和待定搜索数据");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.FindSessions.Cancel.Failed");
+		Event.Status = TEXT("WaitingForOriginal");
+		Event.Message = TEXT("取消完成失败；状态机仅清取消委托，继续等待原 Find 回调作为唯一终点");
+		break;
+	default:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		Event.Code = TEXT("FU.FindSessions.Cancel.InvalidOutcome");
+		Event.Status = TEXT("Rejected");
+		Event.Message = TEXT("Find 取消诊断收到未支持的内部 outcome，未附带原始参数");
+		break;
+	}
+	return Event;
+}
+
 FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
 	const EFU_OnlineProvider Provider,
 	const EFU_OnlineDiagnosticOperation Operation,

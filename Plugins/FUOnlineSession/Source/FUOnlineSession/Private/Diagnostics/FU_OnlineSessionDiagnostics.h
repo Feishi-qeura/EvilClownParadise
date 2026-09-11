@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "FU_OnlineDiagnosticTypes.h"
+#include "FU_OnlineOperationStateMachine.h"
 
 class UGameViewportClient;
 class SFU_OnlineDiagnosticOverlay;
@@ -123,6 +124,43 @@ private:
 	TSharedRef<FFU_OnlineDiagnosticOverlayModel> OverlayModel;
 	TWeakObjectPtr<UGameViewportClient> OverlayViewport;
 	TSharedPtr<SFU_OnlineDiagnosticOverlay> OverlayWidget;
+};
+
+/** Find 取消边界的有限结果；只描述已由状态机验证过的路径，不携带 OSS 原始错误文本。 */
+enum class EFU_FindCancellationDiagnosticOutcome : uint8
+{
+	InterfaceUnavailable,
+	DelegateBound,
+	RequestSubmitted,
+	SynchronousRejected,
+	CancelWonRace,
+	FailedWaitingForOriginal
+};
+
+/**
+ * A1 内部竞态的纯诊断 policy。Subsystem 的模板路径直接消费这些 builder，自动化测试也调用同一实现；
+ * builder 只构造固定 code/status/message，不清 delegate、不改状态机，也不触发任何旧完成委托。
+ */
+class FFU_OnlineOperationPathDiagnostics final
+{
+public:
+	static FFU_OnlineDiagnosticEvent BuildLateCallback(
+		EFU_OnlineProvider Provider,
+		EFU_OnlineDiagnosticOperation Operation,
+		const FGuid& OperationId,
+		bool bSucceeded,
+		EFU_OperationAction Actions);
+
+	static FFU_OnlineDiagnosticEvent BuildRecoveringFindOriginal(
+		EFU_OnlineProvider Provider,
+		const FGuid& OperationId,
+		bool bSucceeded,
+		EFU_OperationAction Actions);
+
+	static FFU_OnlineDiagnosticEvent BuildFindCancellation(
+		EFU_OnlineProvider Provider,
+		const FGuid& OperationId,
+		EFU_FindCancellationDiagnosticOutcome Outcome);
 };
 
 /**

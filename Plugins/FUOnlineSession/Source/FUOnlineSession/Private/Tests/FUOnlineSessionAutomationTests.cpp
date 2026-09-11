@@ -84,6 +84,139 @@ bool FFUOnlineSessionOperationCorrelationTest::RunTest(const FString& Parameters
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionOperationPathsTest,
+	"FUOnlineSession.Diagnostics.OperationPaths",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
+{
+	// 【A1 RED：生产 outcome policy 表驱动】每个 case 都调用 Subsystem 将要消费的真实 builder；
+	// 期望值用固定字面量独立给出，避免测试复制生产映射后与错误实现一起通过。
+	enum class EPathFamily : uint8
+	{
+		LateCallback,
+		RecoveringFindOriginal,
+		FindCancellation
+	};
+	struct FCase
+	{
+		EPathFamily Family;
+		EFU_OnlineDiagnosticOperation Operation;
+		bool bSucceeded;
+		bool bActionFlag;
+		EFU_FindCancellationDiagnosticOutcome CancellationOutcome;
+		const TCHAR* Code;
+		const TCHAR* Status;
+	};
+	const FCase Cases[] = {
+		{ EPathFamily::LateCallback, EFU_OnlineDiagnosticOperation::CreateSession, true, true,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.CreateSession.Recovery.LateCallbackSucceeded"), TEXT("RecoveryDestroyRequested") },
+		{ EPathFamily::LateCallback, EFU_OnlineDiagnosticOperation::CreateSession, false, true,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.CreateSession.Recovery.LateCallbackFailed"), TEXT("RecoveryDestroyRequested") },
+		{ EPathFamily::LateCallback, EFU_OnlineDiagnosticOperation::CreateSession, false, false,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.CreateSession.Recovery.LateCallbackFailed"), TEXT("RecoveryDestroyNotRequested") },
+		{ EPathFamily::LateCallback, EFU_OnlineDiagnosticOperation::JoinSession, true, true,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.JoinSession.Recovery.LateCallbackSucceeded"), TEXT("RecoveryDestroyRequested") },
+		{ EPathFamily::LateCallback, EFU_OnlineDiagnosticOperation::JoinSession, false, true,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.JoinSession.Recovery.LateCallbackFailed"), TEXT("RecoveryDestroyRequested") },
+		{ EPathFamily::LateCallback, EFU_OnlineDiagnosticOperation::JoinSession, false, false,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.JoinSession.Recovery.LateCallbackFailed"), TEXT("RecoveryDestroyNotRequested") },
+		{ EPathFamily::RecoveringFindOriginal, EFU_OnlineDiagnosticOperation::FindSessions, true, true,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.FindSessions.Recovery.OriginalWonCancelRace"), TEXT("Succeeded") },
+		{ EPathFamily::RecoveringFindOriginal, EFU_OnlineDiagnosticOperation::FindSessions, false, true,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.FindSessions.Recovery.OriginalWonCancelRace"), TEXT("Failed") },
+		{ EPathFamily::RecoveringFindOriginal, EFU_OnlineDiagnosticOperation::FindSessions, true, false,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.FindSessions.Recovery.OriginalCompletedAfterCancelRequest"), TEXT("Succeeded") },
+		{ EPathFamily::RecoveringFindOriginal, EFU_OnlineDiagnosticOperation::FindSessions, false, false,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.FindSessions.Recovery.OriginalCompletedAfterCancelRequest"), TEXT("Failed") },
+		{ EPathFamily::FindCancellation, EFU_OnlineDiagnosticOperation::FindSessions, false, false,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable,
+			TEXT("FU.FindSessions.Cancel.InterfaceUnavailable"), TEXT("WaitingForOriginal") },
+		{ EPathFamily::FindCancellation, EFU_OnlineDiagnosticOperation::FindSessions, false, false,
+			EFU_FindCancellationDiagnosticOutcome::DelegateBound,
+			TEXT("FU.FindSessions.Cancel.DelegateBound"), TEXT("Pending") },
+		{ EPathFamily::FindCancellation, EFU_OnlineDiagnosticOperation::FindSessions, false, false,
+			EFU_FindCancellationDiagnosticOutcome::RequestSubmitted,
+			TEXT("FU.FindSessions.Cancel.RequestSubmitted"), TEXT("Pending") },
+		{ EPathFamily::FindCancellation, EFU_OnlineDiagnosticOperation::FindSessions, false, false,
+			EFU_FindCancellationDiagnosticOutcome::SynchronousRejected,
+			TEXT("FU.FindSessions.Cancel.SynchronousRejected"), TEXT("WaitingForOriginal") },
+		{ EPathFamily::FindCancellation, EFU_OnlineDiagnosticOperation::FindSessions, false, false,
+			EFU_FindCancellationDiagnosticOutcome::CancelWonRace,
+			TEXT("FU.FindSessions.Cancel.Completed"), TEXT("CancelWonRace") },
+		{ EPathFamily::FindCancellation, EFU_OnlineDiagnosticOperation::FindSessions, false, false,
+			EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal,
+			TEXT("FU.FindSessions.Cancel.Failed"), TEXT("WaitingForOriginal") },
+	};
+
+	FFU_OnlineDiagnosticDispatchConfig Config;
+	Config.bEmitToLog = false;
+	Config.bEnableOverlay = false;
+	int32 DiagnosticBroadcastCount = 0;
+	int32 LegacyCompletionCount = 0;
+	FFU_OnlineSessionDiagnostics Diagnostics(
+		Config,
+		[&DiagnosticBroadcastCount](const FFU_OnlineDiagnosticEvent&)
+		{
+			++DiagnosticBroadcastCount;
+		});
+	const FGuid OperationId = FGuid::NewGuid();
+	for (const FCase& TestCase : Cases)
+	{
+		FFU_OnlineDiagnosticEvent Candidate;
+		switch (TestCase.Family)
+		{
+		case EPathFamily::LateCallback:
+			Candidate = FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+				EFU_OnlineProvider::Steam,
+				TestCase.Operation,
+				OperationId,
+				TestCase.bSucceeded,
+				TestCase.bActionFlag ? EFU_OperationAction::StartRecoveryDestroy : EFU_OperationAction::None);
+			break;
+		case EPathFamily::RecoveringFindOriginal:
+			Candidate = FFU_OnlineOperationPathDiagnostics::BuildRecoveringFindOriginal(
+				EFU_OnlineProvider::Steam,
+				OperationId,
+				TestCase.bSucceeded,
+				TestCase.bActionFlag ? EFU_OperationAction::ClearFindCancellationDelegate : EFU_OperationAction::None);
+			break;
+		case EPathFamily::FindCancellation:
+			Candidate = FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+				EFU_OnlineProvider::Steam,
+				OperationId,
+				TestCase.CancellationOutcome);
+			break;
+		default:
+			AddError(TEXT("未覆盖的 OperationPaths 测试 family"));
+			continue;
+		}
+
+		const FFU_OnlineDiagnosticEvent Emitted = Diagnostics.Emit(Candidate);
+		TestEqual(TEXT("OperationPaths 使用稳定 code"), Emitted.Code, FString(TestCase.Code));
+		TestEqual(TEXT("OperationPaths 使用准确 status"), Emitted.Status, FString(TestCase.Status));
+		TestEqual(TEXT("OperationPaths 全部属于 Recovery phase"), Emitted.Phase, EFU_OnlineDiagnosticPhase::Recovery);
+		TestEqual(TEXT("OperationPaths 沿用原有效 OperationId"), Emitted.OperationId, OperationId);
+	}
+	TestEqual(
+		TEXT("每个内部 outcome 恰好发出一条 Blueprint 诊断"),
+		DiagnosticBroadcastCount,
+		static_cast<int32>(UE_ARRAY_COUNT(Cases)));
+	TestEqual(TEXT("内部 outcome 诊断没有 legacy completion 副作用"), LegacyCompletionCount, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FFUOnlineSessionLeaseOutcomesTest,
 	"FUOnlineSession.Diagnostics.LeaseOutcomes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

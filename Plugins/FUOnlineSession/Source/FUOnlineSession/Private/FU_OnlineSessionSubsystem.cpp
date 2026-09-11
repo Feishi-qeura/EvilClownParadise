@@ -1319,11 +1319,23 @@ void UFU_OnlineSessionSubsystem::FU_OnCreateSessionComplete(
 	const bool bSessionStillExists = State.SessionInterface.IsValid()
 		&& State.SessionInterface->GetNamedSession(NAME_GameSession) != nullptr;
 	const bool bOverallSucceeded = bWasSuccessful && bSessionStillExists;
+	const FGuid OperationId = Machine.Get().ActiveOperationId;
 	const EFU_OperationAction Actions = Machine.HandleOriginalCompletion(
 		Generation,
 		EFU_OperationKind::Create,
 		bOverallSucceeded,
 		bSessionStillExists);
+	if (bWasRecovering)
+	{
+		// 【A1 时序】状态机先决定是否请求补偿 Destroy；诊断同步公开同一原 OperationId 后，
+		// 才允许清 delegate/pending 或执行恢复 action。Blueprint 重入因此只能看到已转换状态。
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+			Provider,
+			EFU_OnlineDiagnosticOperation::CreateSession,
+			OperationId,
+			bOverallSucceeded,
+			Actions));
+	}
 
 	FU_ClearOperationWatchdog<Provider>();
 	FU_ClearCreateDelegate<Provider>();
@@ -1489,11 +1501,32 @@ void UFU_OnlineSessionSubsystem::FU_OnFindSessionsComplete(
 		return;
 	}
 	const bool bWasRecovering = Machine.Get().Phase == EFU_OperationPhase::Recovering;
-	Machine.HandleOriginalCompletion(Generation, EFU_OperationKind::Find, bWasSuccessful, false);
+	const FGuid OperationId = Machine.Get().ActiveOperationId;
+	const EFU_OperationAction Actions =
+		Machine.HandleOriginalCompletion(Generation, EFU_OperationKind::Find, bWasSuccessful, false);
+	if (bWasRecovering)
+	{
+		// 【A1 Find 竞态】Actions 中是否清 cancel delegate 是“原 Find 赢得竞争”的唯一事实；
+		// 必须在状态转换后先发诊断，再按同一 action 精确清 Handle 和 pending 数据。
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveringFindOriginal(
+			Provider,
+			OperationId,
+			bWasSuccessful,
+			Actions));
+	}
 
-	FU_ClearOperationWatchdog<Provider>();
-    FU_ClearFindDelegate<Provider>();
-	FU_ClearFindCancellationDelegate<Provider>();
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
+	{
+		FU_ClearOperationWatchdog<Provider>();
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearOriginalDelegate))
+	{
+		FU_ClearFindDelegate<Provider>();
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate))
+	{
+		FU_ClearFindCancellationDelegate<Provider>();
+	}
 	if (bWasRecovering)
 	{
 		// watchdog 已经广播失败；迟到 Find 只负责终止并清理，结果不能作为新的成功再次交给蓝图。
@@ -1879,11 +1912,23 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 	{
 		BlueprintResult = EFU_JoinSessionResult::UnknownError;
 	}
+	const FGuid OperationId = Machine.Get().ActiveOperationId;
 	const EFU_OperationAction Actions = Machine.HandleOriginalCompletion(
 		Generation,
 		EFU_OperationKind::Join,
 		bOverallSucceeded,
 		bSessionStillExists);
+	if (bWasRecovering)
+	{
+		// 【A1 时序/安全】迟到 Join 即使解析出地址也只公开有限 outcome；状态机先转换，
+		// 诊断再同步发出，随后才清资源/启动补偿 Destroy，绝不 ClientTravel 或重复旧 completion。
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+			Provider,
+			EFU_OnlineDiagnosticOperation::JoinSession,
+			OperationId,
+			bOverallSucceeded,
+			Actions));
+	}
 	FU_ClearOperationWatchdog<Provider>();
 	FU_ClearJoinDelegate<Provider>();
 
@@ -1929,6 +1974,78 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 }
 
 template<EFU_OnlineProvider Provider>
+void UFU_OnlineSessionSubsystem::FU_BeginFindCancellation(const uint64 Generation)
+{
+	FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
+	FFU_OnlineOperationStateMachine& Machine = FU_GetOperationMachine<Provider>();
+	// 【A1 generation gate】只有刚由 timeout 转入 Recovering 且仍等待原 Find 的同 generation
+	// 才能关联 OperationId；任何 stale/wrong-generation 调用保持无事件、无清理。
+	if (!Machine.IsExpectedCallback(Generation, EFU_OperationKind::Find)
+		|| Machine.Get().Phase != EFU_OperationPhase::Recovering
+		|| !Machine.Get().bFindCancellationOutstanding)
+	{
+		return;
+	}
+	const FGuid OperationId = Machine.Get().ActiveOperationId;
+
+	if (!State.SessionInterface.IsValid())
+	{
+		const EFU_OperationAction Actions = Machine.HandleFindCancellationCompletion(Generation, false);
+		if (Actions == EFU_OperationAction::None)
+		{
+			return;
+		}
+		// 状态机已决定“失败取消、继续等待原 Find”；先公开诊断，且没有不存在的 Handle 可清。
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+			Provider,
+			OperationId,
+			EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable));
+		return;
+	}
+
+	// UE 5.8 的 CancelFindSessions 使用全局完成委托；先绑定再调用，才能容忍同步完成。
+	State.CancelFindDelegateHandle = State.SessionInterface->AddOnCancelFindSessionsCompleteDelegate_Handle(
+		FOnCancelFindSessionsCompleteDelegate::CreateUObject(
+			this,
+			&ThisClass::FU_OnCancelFindSessionsComplete<Provider>,
+			Generation));
+	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+		Provider,
+		OperationId,
+		EFU_FindCancellationDiagnosticOutcome::DelegateBound));
+
+	const bool bRequestSubmitted = State.SessionInterface->CancelFindSessions();
+	if (bRequestSubmitted)
+	{
+		// 若 Provider 在调用栈内同步完成，完成回调已经先转换并清理；此处不得再补一条过时 Pending。
+		if (Machine.IsExpectedCallback(Generation, EFU_OperationKind::Find)
+			&& Machine.Get().bFindCancellationOutstanding)
+		{
+			FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+				Provider,
+				OperationId,
+				EFU_FindCancellationDiagnosticOutcome::RequestSubmitted));
+		}
+		return;
+	}
+
+	const EFU_OperationAction Actions = Machine.HandleFindCancellationCompletion(Generation, false);
+	if (Actions == EFU_OperationAction::None)
+	{
+		// 调用栈内若已有有效完成回调赢得竞争，其事件已经使用原 ID 发出；这里不错误关联新操作。
+		return;
+	}
+	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+		Provider,
+		OperationId,
+		EFU_FindCancellationDiagnosticOutcome::SynchronousRejected));
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate))
+	{
+		FU_ClearFindCancellationDelegate<Provider>();
+	}
+}
+
+template<EFU_OnlineProvider Provider>
 void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 {
 	FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
@@ -1942,11 +2059,6 @@ void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 		return;
 	}
 
-	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
-	{
-		FU_ClearOperationWatchdog<Provider>();
-	}
-
 	FU_EmitDiagnostic<Provider>(
 		SubmittedKind,
 		OperationId,
@@ -1954,6 +2066,11 @@ void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 		EFU_OnlineDiagnosticSeverity::Error,
 		TEXT("FU.Operation.Timeout"),
 		FString::Printf(TEXT("OSS 操作超时 Generation=%llu；保留不可取消原回调直到终态"), Generation));
+
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
+	{
+		FU_ClearOperationWatchdog<Provider>();
+	}
 
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::BroadcastFailure))
 	{
@@ -1973,31 +2090,12 @@ void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::StartFindCancellation))
 	{
-		if (!State.SessionInterface.IsValid())
-		{
-			Machine.HandleFindCancellationCompletion(Generation, false);
-			return;
-		}
-
-		// UE 5.8 的 CancelFindSessions 使用全局完成委托；先绑定再调用，才能容忍同步完成。
-		State.CancelFindDelegateHandle = State.SessionInterface->AddOnCancelFindSessionsCompleteDelegate_Handle(
-			FOnCancelFindSessionsCompleteDelegate::CreateUObject(
-				this,
-				&ThisClass::FU_OnFindCancellationComplete<Provider>,
-				Generation));
-		if (!State.SessionInterface->CancelFindSessions())
-		{
-			const EFU_OperationAction CancelActions = Machine.HandleFindCancellationCompletion(Generation, false);
-			if (EnumHasAnyFlags(CancelActions, EFU_OperationAction::ClearFindCancellationDelegate))
-			{
-				FU_ClearFindCancellationDelegate<Provider>();
-			}
-		}
+		FU_BeginFindCancellation<Provider>(Generation);
 	}
 }
 
 template<EFU_OnlineProvider Provider>
-void UFU_OnlineSessionSubsystem::FU_OnFindCancellationComplete(
+void UFU_OnlineSessionSubsystem::FU_OnCancelFindSessionsComplete(
 	const bool bWasSuccessful,
 	const uint64 Generation)
 {
@@ -2008,6 +2106,15 @@ void UFU_OnlineSessionSubsystem::FU_OnFindCancellationComplete(
 	{
 		return;
 	}
+	// 【A1 stale 安全】OperationId 只在状态机已验证 generation/kind/phase 并返回有效 action 后读取；
+	// None 分支绝不借用当前新操作的 ActiveOperationId，也不清任何新 Handle。
+	const FGuid OperationId = Machine.Get().ActiveOperationId;
+	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+		Provider,
+		OperationId,
+		bWasSuccessful
+			? EFU_FindCancellationDiagnosticOutcome::CancelWonRace
+			: EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal));
 
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate))
 	{
@@ -2426,6 +2533,24 @@ void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Eve
 	}
 
 	Diagnostics->Emit(Event);
+}
+
+template<EFU_OnlineProvider Provider>
+void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event)
+{
+	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
+	static_assert(
+		Provider == EFU_OnlineProvider::Steam || Provider == EFU_OnlineProvider::Lan,
+		"不受支持的 FU 在线提供商");
+
+	// 【A1 模板唯一真相】纯 policy 可供无 UObject 测试构造事件，但生产分发前必须由模板特化
+	// 覆盖 Provider 并补 traits Subsystem；任何运行时输入都不能伪装成另一提供方。
+	Event.Provider = Provider;
+	FFU_OnlineDiagnosticField SubsystemField;
+	SubsystemField.Key = FName(TEXT("Subsystem"));
+	SubsystemField.Value = FProviderTraits::GetSubsystemName().ToString();
+	Event.Fields.Add(MoveTemp(SubsystemField));
+	FU_EmitDiagnostic(MoveTemp(Event));
 }
 
 template<EFU_OnlineProvider Provider>

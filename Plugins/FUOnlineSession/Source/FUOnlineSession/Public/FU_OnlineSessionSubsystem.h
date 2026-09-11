@@ -339,7 +339,7 @@ private:
 	void FU_OnDestroySessionComplete(FName SessionName, bool bWasSuccessful, uint64 Generation);
 
 	template<EFU_OnlineProvider Provider>
-	void FU_OnFindCancellationComplete(bool bWasSuccessful, uint64 Generation);
+	void FU_OnCancelFindSessionsComplete(bool bWasSuccessful, uint64 Generation);
 
 	template<EFU_OnlineProvider Provider>
 	void FU_OnOperationTimeout(uint64 Generation);
@@ -422,6 +422,10 @@ private:
 	template<EFU_OnlineProvider Provider>
 	void FU_ClearFindCancellationDelegate();
 
+	/** Find watchdog 触发后的唯一取消入口；取消失败仍保留原 Find completion 作为终点。 */
+	template<EFU_OnlineProvider Provider>
+	void FU_BeginFindCancellation(uint64 Generation);
+
 	template<EFU_OnlineProvider Provider>
 	void FU_BroadcastOperationFailure(EFU_OperationKind RootKind);
 
@@ -445,6 +449,10 @@ private:
 		const FString& Message,
 		const FString& RoomName = FString(),
 		const TCHAR* StatusOverride = nullptr);
+
+	/** production outcome builder 已填充 operation/code/status；模板边界只补 traits Provider/Subsystem。 */
+	template<EFU_OnlineProvider Provider>
+	void FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event);
 
 	/** Provider 状态查询的环境事件同样只能由模板和 traits 决定 Provider。 */
 	template<EFU_OnlineProvider Provider>
