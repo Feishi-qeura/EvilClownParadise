@@ -271,7 +271,7 @@ FFU_OnlineSessionDiagnostics::FFU_OnlineSessionDiagnostics(
 	if (!ReportWriter)
 	{
 		// 【默认生产写入器】测试可注入失败 writer；运行时仍保持既有受限路径与 UTF-8 报告格式。
-		ReportWriter = [](const FString& Contents, const FString& Destination)
+		ReportWriter = [](const FString& Contents, const FString& Destination, FString& OutRawFailureDetail)
 		{
 			return FFileHelper::SaveStringToFile(
 				Contents,
@@ -396,7 +396,8 @@ bool FFU_OnlineSessionDiagnostics::SaveReport(FString& OutSavedPath, FString& Ou
 		TEXT("FUOnlineSession-Diagnostics-%s.txt"),
 		*FDateTime::UtcNow().ToString(TEXT("yyyyMMdd-HHmmss-fff")));
 	const FString SavedPath = FPaths::Combine(ReportDirectory, Filename);
-	if (!ReportWriter(BuildReport(), SavedPath))
+	FString RawWriterFailureDetail;
+	if (!ReportWriter(BuildReport(), SavedPath, RawWriterFailureDetail))
 	{
 		OutError = TEXT("无法写入 FUOnlineSession 诊断报告");
 		FFU_OnlineDiagnosticEvent FailureEvent;
@@ -498,6 +499,30 @@ FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::BuildProviderPreflightDi
 		? TEXT("环境已就绪；可继续调用对应的 Create、Find、Join 或 Destroy 蓝图入口")
 		: TEXT("根据 StatusCode 修复环境后重新运行 RunProviderDiagnostics");
 	return Event;
+}
+
+bool FFU_OnlineProviderPreflightGate::Dispatch(
+	const EFU_OnlineProvider Provider,
+	const EFU_OnlineDiagnosticOperation Operation,
+	const FGuid& OperationId,
+	const FFU_OnlineProviderStatus& Status,
+	TFunctionRef<void(FFU_OnlineDiagnosticEvent)> DiagnosticSink,
+	TFunctionRef<void()> FailureContinuation)
+{
+	// 【顺序契约】无论 Ready 或 Rejected，先交给唯一诊断 sink；拒绝时才允许旧失败续步执行。
+	DiagnosticSink(FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
+		Provider,
+		Operation,
+		OperationId,
+		Status.bIsReady,
+		Status.DiagnosticCode.ToString(),
+		Status.Message));
+	if (!Status.bIsReady)
+	{
+		FailureContinuation();
+		return false;
+	}
+	return true;
 }
 
 void FFU_OnlineSessionDiagnostics::AttachViewport(UGameViewportClient* InViewport)

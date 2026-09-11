@@ -45,26 +45,34 @@ bool FFUOnlineSessionOperationCorrelationTest::RunTest(const FString& Parameters
 		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs);
 	TestEqual(TEXT("测试缝确实得到 Steam 子系统不可用"), StatusCode, EFU_OnlineProviderStatusCode::SubsystemUnavailable);
 
-	// 【生产缝回归】FU_ValidateProviderReady 使用同一个纯构造器；先 Emit 再模拟既有完成委托，
-	// 锁住 Blueprint 能在旧结果之前读取明确原因的时序，且测试不再手写一份预检事件字段。
-	if (StatusCode != EFU_OnlineProviderStatusCode::Ready)
-	{
-		const FFU_OnlineDiagnosticEvent PreflightEvent =
-			FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
-				EFU_OnlineProvider::Steam,
-				EFU_OnlineDiagnosticOperation::CreateSession,
-				Ticket.OperationId,
-				false,
-				TEXT("FU.Provider.SubsystemUnavailable"),
-				TEXT("Steam OnlineSubsystem 不可用"));
-		Diagnostics.Emit(PreflightEvent);
-		++LegacyFailureBroadcastCount;
-	}
+	FFU_OnlineProviderStatus Status;
+	Status.bIsReady = StatusCode == EFU_OnlineProviderStatusCode::Ready;
+	Status.StatusCode = StatusCode;
+	Status.DiagnosticCode = TEXT("FU.Provider.SubsystemUnavailable");
+	Status.Message = TEXT("Steam OnlineSubsystem 不可用");
+	TArray<FString> DispatchOrder;
+	const bool bGateAccepted = FFU_OnlineProviderPreflightGate::Dispatch(
+		EFU_OnlineProvider::Steam,
+		EFU_OnlineDiagnosticOperation::CreateSession,
+		Ticket.OperationId,
+		Status,
+		[&Diagnostics, &DispatchOrder](FFU_OnlineDiagnosticEvent Event)
+		{
+			DispatchOrder.Add(TEXT("Diagnostic"));
+			Diagnostics.Emit(MoveTemp(Event));
+		},
+		[&LegacyFailureBroadcastCount, &DispatchOrder]()
+		{
+			DispatchOrder.Add(TEXT("LegacyFailure"));
+			++LegacyFailureBroadcastCount;
+		});
+	TestFalse(TEXT("生产 gate 对 SubsystemUnavailable 拒绝入口"), bGateAccepted);
 
 	const TArray<FFU_OnlineDiagnosticEvent> History = Diagnostics.GetHistory();
 	TestEqual(TEXT("预检拒绝先写入一条诊断历史"), History.Num(), 1);
 	TestEqual(TEXT("旧失败委托只在诊断事件之后触发一次"), LegacyFailureBroadcastCount, 1);
 	TestEqual(TEXT("诊断 Blueprint 出口恰好广播一次"), BlueprintDiagnosticBroadcastCount, 1);
+	TestEqual(TEXT("生产 gate 必须先诊断后续步"), DispatchOrder, TArray<FString>{ TEXT("Diagnostic"), TEXT("LegacyFailure") });
 	if (History.Num() == 1)
 	{
 		TestEqual(TEXT("预检事件关联 Create"), History[0].Operation, EFU_OnlineDiagnosticOperation::CreateSession);
@@ -88,15 +96,18 @@ bool FFUOnlineSessionDiagnosticSaveFailureTest::RunTest(const FString& Parameter
 	Config.bEnableOverlay = false;
 	int32 WriteAttempts = 0;
 	int32 BlueprintEventCount = 0;
+	TArray<FFU_OnlineDiagnosticEvent> BlueprintEvents;
 	FFU_OnlineSessionDiagnostics Diagnostics(
 		Config,
-		[&BlueprintEventCount](const FFU_OnlineDiagnosticEvent&)
+		[&BlueprintEventCount, &BlueprintEvents](const FFU_OnlineDiagnosticEvent& Event)
 		{
 			++BlueprintEventCount;
+			BlueprintEvents.Add(Event);
 		},
-		[&WriteAttempts](const FString&, const FString&)
+		[&WriteAttempts](const FString&, const FString&, FString& OutRawFailureDetail)
 		{
 			++WriteAttempts;
+			OutRawFailureDetail = TEXT("token=writer-secret travelurl=steam://private");
 			return false;
 		});
 
@@ -106,6 +117,7 @@ bool FFUOnlineSessionDiagnosticSaveFailureTest::RunTest(const FString& Parameter
 	TestEqual(TEXT("写入失败不会递归重试"), WriteAttempts, 1);
 	TestTrue(TEXT("失败不返回伪造保存路径"), SavedPath.IsEmpty());
 	TestFalse(TEXT("失败文本不回显注入写入器输入"), SaveError.Contains(TEXT("token="), ESearchCase::IgnoreCase));
+	TestFalse(TEXT("失败文本不回显原始旅行 URL"), SaveError.Contains(TEXT("steam://private"), ESearchCase::IgnoreCase));
 	const TArray<FFU_OnlineDiagnosticEvent> History = Diagnostics.GetHistory();
 	TestEqual(TEXT("写入失败至多产生一条诊断事件"), History.Num(), 1);
 	TestEqual(TEXT("失败事件只通过一次 Blueprint 出口"), BlueprintEventCount, 1);
@@ -113,6 +125,12 @@ bool FFUOnlineSessionDiagnosticSaveFailureTest::RunTest(const FString& Parameter
 	{
 		TestEqual(TEXT("写入失败使用稳定安全错误码"), History[0].Code, FString(TEXT("FU.Diagnostics.ReportSaveFailed")));
 		TestTrue(TEXT("写入失败事件不携带字段"), History[0].Fields.IsEmpty());
+		TestFalse(TEXT("历史不回显 writer token"), History[0].Message.Contains(TEXT("writer-secret"), ESearchCase::IgnoreCase));
+	}
+	TestEqual(TEXT("失败事件只向 Blueprint 发出一次"), BlueprintEvents.Num(), 1);
+	if (BlueprintEvents.Num() == 1)
+	{
+		TestFalse(TEXT("Blueprint 不回显 writer URL"), BlueprintEvents[0].Message.Contains(TEXT("steam://private"), ESearchCase::IgnoreCase));
 	}
 	return true;
 }

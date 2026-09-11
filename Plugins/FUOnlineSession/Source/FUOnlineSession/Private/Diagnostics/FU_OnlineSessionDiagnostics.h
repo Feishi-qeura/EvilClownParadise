@@ -57,7 +57,7 @@ public:
 	/**
 	 * 报告写入边界；默认实现使用 FFileHelper。仅测试可替换它，以验证写入失败不会递归重试或泄露写入错误原文。
 	 */
-	using FReportWriter = TFunction<bool(const FString& Contents, const FString& Destination)>;
+	using FReportWriter = TFunction<bool(const FString& Contents, const FString& Destination, FString& OutRawFailureDetail)>;
 
 	explicit FFU_OnlineSessionDiagnostics(
 		const FFU_OnlineDiagnosticDispatchConfig& InConfig,
@@ -119,4 +119,19 @@ private:
 	TSharedRef<FFU_OnlineDiagnosticOverlayModel> OverlayModel;
 	TWeakObjectPtr<UGameViewportClient> OverlayViewport;
 	TSharedPtr<SFU_OnlineDiagnosticOverlay> OverlayWidget;
+};
+
+/**
+ * 无 UObject 的预检 gate：生产模板与自动化测试必须共用它，保证诊断 sink 一定早于旧失败续步。
+ */
+class FFU_OnlineProviderPreflightGate final
+{
+public:
+	static bool Dispatch(
+		EFU_OnlineProvider Provider,
+		EFU_OnlineDiagnosticOperation Operation,
+		const FGuid& OperationId,
+		const FFU_OnlineProviderStatus& Status,
+		TFunctionRef<void(FFU_OnlineDiagnosticEvent)> DiagnosticSink,
+		TFunctionRef<void()> FailureContinuation);
 };

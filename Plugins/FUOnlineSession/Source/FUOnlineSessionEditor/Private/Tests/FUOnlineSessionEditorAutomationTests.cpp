@@ -56,17 +56,17 @@ bool FFUOnlineSessionProviderOperationPreflightWiringTest::RunTest(const FString
 
 	TestTrue(
 		TEXT("创建模板入口必须检查 Provider 是否 Ready"),
-		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"CreateSession\"))")));
+		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"CreateSession\"), true, [this]")));
 
 	TestTrue(
 		TEXT("搜索模板入口必须检查 Provider 是否 Ready，但不得占用传输 NetDriver 租约"),
 		// 【FU 回归测试：搜索与传输解耦】FindSessions 仍需验证 OSS、身份与 AppID，
 		// 但它不会 Listen/ClientTravel，所以必须显式传入 false，避免另一 Provider 的活动连接阻止搜索。
-		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"FindSessions\"), false)")));
+		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"FindSessions\"), false, [this]")));
 
 	TestTrue(
 		TEXT("加入模板入口必须检查 Provider 是否 Ready"),
-		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"JoinSession\"))")));
+		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"JoinSession\"), true, [this]")));
 
 	return true;
 }

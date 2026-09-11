@@ -613,7 +613,8 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
 	const EFU_OperationKind RootKind,
 	const FGuid& OperationId,
 	const TCHAR* OperationName,
-	const bool bRequiresNetDriver)
+	const bool bRequiresNetDriver,
+	TFunctionRef<void()> FailureContinuation)
 {
 	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
 
@@ -636,27 +637,26 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
 		default: return EFU_OnlineDiagnosticOperation::Recovery;
 		}
 	};
-	const auto EmitProviderPreflight = [&]()
+	const bool bReady = FFU_OnlineProviderPreflightGate::Dispatch(
+		Provider,
+		GetDiagnosticOperation(),
+		OperationId,
+		Status,
+		[this](FFU_OnlineDiagnosticEvent Event)
 	{
 		// 【可测生产缝】预检模板与纯自动化测试共用同一事件构造器；这里仍由 Subsystem
 		// 负责补齐 World/PIE 并经唯一的 Emit 出口分发，避免测试手写一份相似事件。
-		FFU_OnlineDiagnosticEvent Event = FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
-			Provider,
-			GetDiagnosticOperation(),
-			OperationId,
-			Status.bIsReady,
-			FUOnlineSession::GetProviderStatusDiagnosticCode(Status.StatusCode),
-			Status.Message);
 		FFU_OnlineDiagnosticField SubsystemField;
 		SubsystemField.Key = FName(TEXT("Subsystem"));
 		SubsystemField.Value = FProviderTraits::GetSubsystemName().ToString();
 		Event.Fields.Add(MoveTemp(SubsystemField));
 		FU_EmitDiagnostic(MoveTemp(Event));
-	};
+	},
+		FailureContinuation);
 	if (Status.bIsReady)
 	{
 		// 预检通过同样需要可观察，Blueprint 可用同一 OperationId 串起 Requested -> Preflight -> Submitted。
-		EmitProviderPreflight();
+		check(bReady);
 		return true;
 	}
 
@@ -692,7 +692,7 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
 
 	// 【Task 7 时序契约】先把拒绝原因与入口分配的 ID 写入历史/Blueprint，再由调用者广播旧失败委托。
 	// 不能在这里新建 Ticket，否则预销毁续步、Busy 拒绝与后续诊断会断开成不同操作。
-	EmitProviderPreflight();
+	check(!bReady);
 
 	return false;
 }
@@ -1139,9 +1139,11 @@ void UFU_OnlineSessionSubsystem::FU_CreateSession(const int32 MaxPlayers, const 
 
 	// 【FU 修复：Runtime 自我保护】蓝图即使没有先检查状态，
 	// Steam 未登录、子系统缺失或驱动不可用时也不会进入 CreateSession 异步流程。
-	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("CreateSession")))
+	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("CreateSession"), true, [this]()
 	{
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
+	}))
+	{
 		return;
 	}
 
@@ -1373,9 +1375,11 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
 	// 在这里提前拒绝 NotLoggedIn，可避免随后只得到含义模糊的异步 false 和空 Results。
 	// 搜索不会 Listen 或 ClientTravel，因此不能被另一 Provider 的进程级 NetDriver 租约阻止；
 	// Steam 身份、AppID 与 OSS Session Interface 等搜索环境仍由同一 Evaluator 检查。
-	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("FindSessions"), false))
+	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("FindSessions"), false, [this]()
 	{
 		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
+	}))
+	{
 		return;
 	}
 
@@ -1606,9 +1610,11 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
 
 	// 【FU 修复：加入前重新验证环境】搜索完成到点击加入之间，Steam 可能掉线，
 	// NetDriver 也可能因地图状态改变而产生冲突；使用同一模板检查可以保留 Provider 类型信息。
-	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("JoinSession")))
+	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("JoinSession"), true, [this]()
 	{
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::UnknownError);
+	}))
+	{
 		return;
 	}
 

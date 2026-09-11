@@ -287,7 +287,8 @@ private:
 		EFU_OperationKind RootKind,
 		const FGuid& OperationId,
 		const TCHAR* OperationName,
-		bool bRequiresNetDriver = true);
+		bool bRequiresNetDriver,
+		TFunctionRef<void()> FailureContinuation);
 
 	/**
 	 * 【FU 修复：模板化传输选择】
