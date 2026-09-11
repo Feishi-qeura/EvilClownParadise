@@ -58,11 +58,14 @@ public:
 	 * 报告写入边界；默认实现使用 FFileHelper。仅测试可替换它，以验证写入失败不会递归重试或泄露写入错误原文。
 	 */
 	using FReportWriter = TFunction<bool(const FString& Contents, const FString& Destination, FString& OutRawFailureDetail)>;
+	/** 已脱敏事件的日志出口；默认 WriteToLog，测试可捕获完整格式行而不写 UE_LOG。 */
+	using FLogSink = TFunction<void(const FFU_OnlineDiagnosticEvent& Event, const FString& FormattedLine)>;
 
 	explicit FFU_OnlineSessionDiagnostics(
 		const FFU_OnlineDiagnosticDispatchConfig& InConfig,
 		TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast,
-		FReportWriter InReportWriter = FReportWriter());
+		FReportWriter InReportWriter = FReportWriter(),
+		FLogSink InLogSink = FLogSink());
 
 	/** 统一执行脱敏 -> 有界历史 -> UE_LOG -> Slate 浮层 -> Blueprint 广播。 */
 	FFU_OnlineDiagnosticEvent Emit(const FFU_OnlineDiagnosticEvent& CandidateEvent);
@@ -116,6 +119,7 @@ private:
 	int64 NextSequence = 0;
 	TFunction<void(const FFU_OnlineDiagnosticEvent&)> BlueprintBroadcast;
 	FReportWriter ReportWriter;
+	FLogSink LogSink;
 	TSharedRef<FFU_OnlineDiagnosticOverlayModel> OverlayModel;
 	TWeakObjectPtr<UGameViewportClient> OverlayViewport;
 	TSharedPtr<SFU_OnlineDiagnosticOverlay> OverlayWidget;

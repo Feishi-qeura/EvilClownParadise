@@ -442,7 +442,8 @@ private:
 		EFU_OnlineDiagnosticSeverity Severity,
 		const TCHAR* Code,
 		const FString& Message,
-		const FString& RoomName = FString());
+		const FString& RoomName = FString(),
+		const TCHAR* StatusOverride = nullptr);
 
 	/** Provider 状态查询的环境事件同样只能由模板和 traits 决定 Provider。 */
 	template<EFU_OnlineProvider Provider>

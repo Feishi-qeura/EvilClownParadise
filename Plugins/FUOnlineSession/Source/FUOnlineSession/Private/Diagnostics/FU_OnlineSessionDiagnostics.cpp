@@ -258,10 +258,12 @@ TArray<FFU_OnlineDiagnosticOverlayRow> FFU_OnlineDiagnosticOverlayModel::GetVisi
 FFU_OnlineSessionDiagnostics::FFU_OnlineSessionDiagnostics(
 	const FFU_OnlineDiagnosticDispatchConfig& InConfig,
 	TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast,
-	FReportWriter InReportWriter)
+	FReportWriter InReportWriter,
+	FLogSink InLogSink)
 	: Config(InConfig)
 	, BlueprintBroadcast(MoveTemp(InBlueprintBroadcast))
 	, ReportWriter(MoveTemp(InReportWriter))
+	, LogSink(MoveTemp(InLogSink))
 	, OverlayModel(MakeShared<FFU_OnlineDiagnosticOverlayModel>())
 {
 	// 【运行时防御】Subsystem 已消毒配置；这里仍做最小边界保护，让私有测试或未来调用者不会创建无界容器。
@@ -277,6 +279,13 @@ FFU_OnlineSessionDiagnostics::FFU_OnlineSessionDiagnostics(
 				Contents,
 				*Destination,
 				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		};
+	}
+	if (!LogSink)
+	{
+		LogSink = [](const FFU_OnlineDiagnosticEvent& Event, const FString&)
+		{
+			WriteToLog(Event);
 		};
 	}
 }
@@ -295,7 +304,7 @@ FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::Emit(const FFU_OnlineDia
 
 	if (Config.bEmitToLog)
 	{
-		WriteToLog(Event);
+		LogSink(Event, FormatEventForOutput(Event));
 	}
 
 	// 浮层模型独立于实际 Viewport；没有 Viewport 时它只是暂不显示，绝不影响后续 Blueprint/历史。

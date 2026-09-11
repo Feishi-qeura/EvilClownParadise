@@ -92,11 +92,12 @@ bool FFUOnlineSessionDiagnosticSaveFailureTest::RunTest(const FString& Parameter
 {
 	// 【失败注入】写入器只允许被调用一次；SaveReport 的失败事件只能走 Emit，不能重新尝试写报告。
 	FFU_OnlineDiagnosticDispatchConfig Config;
-	Config.bEmitToLog = false;
+	Config.bEmitToLog = true;
 	Config.bEnableOverlay = false;
 	int32 WriteAttempts = 0;
 	int32 BlueprintEventCount = 0;
 	TArray<FFU_OnlineDiagnosticEvent> BlueprintEvents;
+	TArray<FString> CapturedLogLines;
 	FFU_OnlineSessionDiagnostics Diagnostics(
 		Config,
 		[&BlueprintEventCount, &BlueprintEvents](const FFU_OnlineDiagnosticEvent& Event)
@@ -109,6 +110,10 @@ bool FFUOnlineSessionDiagnosticSaveFailureTest::RunTest(const FString& Parameter
 			++WriteAttempts;
 			OutRawFailureDetail = TEXT("token=writer-secret travelurl=steam://private");
 			return false;
+		},
+		[&CapturedLogLines](const FFU_OnlineDiagnosticEvent&, const FString& Line)
+		{
+			CapturedLogLines.Add(Line);
 		});
 
 	FString SavedPath;
@@ -121,6 +126,12 @@ bool FFUOnlineSessionDiagnosticSaveFailureTest::RunTest(const FString& Parameter
 	const TArray<FFU_OnlineDiagnosticEvent> History = Diagnostics.GetHistory();
 	TestEqual(TEXT("写入失败至多产生一条诊断事件"), History.Num(), 1);
 	TestEqual(TEXT("失败事件只通过一次 Blueprint 出口"), BlueprintEventCount, 1);
+	TestEqual(TEXT("失败事件只写一次安全日志"), CapturedLogLines.Num(), 1);
+	if (CapturedLogLines.Num() == 1)
+	{
+		TestFalse(TEXT("日志不回显 writer token"), CapturedLogLines[0].Contains(TEXT("writer-secret"), ESearchCase::IgnoreCase));
+		TestFalse(TEXT("日志不回显 writer URL"), CapturedLogLines[0].Contains(TEXT("steam://private"), ESearchCase::IgnoreCase));
+	}
 	if (History.Num() == 1)
 	{
 		TestEqual(TEXT("写入失败使用稳定安全错误码"), History[0].Code, FString(TEXT("FU.Diagnostics.ReportSaveFailed")));

@@ -2412,7 +2412,8 @@ void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(
 	const EFU_OnlineDiagnosticSeverity Severity,
 	const TCHAR* Code,
 	const FString& Message,
-	const FString& RoomName)
+	const FString& RoomName,
+	const TCHAR* StatusOverride)
 {
 	using FProviderTraits = TFU_OnlineSessionProviderTraits<Provider>;
 	static_assert(
@@ -2427,7 +2428,15 @@ void UFU_OnlineSessionSubsystem::FU_EmitDiagnostic(
 	Event.Phase = Phase;
 	Event.Severity = Severity;
 	Event.Code = Code ? Code : TEXT("FU.Operation.Unknown");
-	Event.Status = Phase == EFU_OnlineDiagnosticPhase::Completed ? TEXT("Completed") : TEXT("Pending");
+	// 【结果优先】Callback 不等于 Pending：调用方提供稳定 outcome/subtype 时必须原样保留，
+	// 否则按生命周期派生有限状态，避免失败与延迟在 Blueprint/报告中混为一谈。
+	Event.Status = StatusOverride && *StatusOverride
+		? StatusOverride
+		: (Phase == EFU_OnlineDiagnosticPhase::Completed ? TEXT("Completed")
+			: Phase == EFU_OnlineDiagnosticPhase::Timeout ? TEXT("Failed")
+			: Phase == EFU_OnlineDiagnosticPhase::Recovery ? TEXT("Deferred")
+			: Phase == EFU_OnlineDiagnosticPhase::Preflight ? TEXT("Rejected")
+			: TEXT("Pending"));
 	Event.Message = Message;
 	Event.RecommendedAction = Phase == EFU_OnlineDiagnosticPhase::Recovery
 		? TEXT("等待原始 OSS 回调及驱动/租约安全条件后再次调用 TryRecoverProvider")
@@ -2520,10 +2529,10 @@ void UFU_OnlineSessionSubsystem::FU_EmitConnectionFailureDiagnostic(
 	switch (Provider)
 	{
 	case EFU_OnlineProvider::Steam:
-		FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(Kind, OperationId, EFU_OnlineDiagnosticPhase::Callback, EFU_OnlineDiagnosticSeverity::Error, Code, Message);
+		FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(Kind, OperationId, EFU_OnlineDiagnosticPhase::Callback, EFU_OnlineDiagnosticSeverity::Error, Code, Message, FString(), StableStatus);
 		break;
 	case EFU_OnlineProvider::Lan:
-		FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(Kind, OperationId, EFU_OnlineDiagnosticPhase::Callback, EFU_OnlineDiagnosticSeverity::Error, Code, Message);
+		FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(Kind, OperationId, EFU_OnlineDiagnosticPhase::Callback, EFU_OnlineDiagnosticSeverity::Error, Code, Message, FString(), StableStatus);
 		break;
 	default:
 		break;
