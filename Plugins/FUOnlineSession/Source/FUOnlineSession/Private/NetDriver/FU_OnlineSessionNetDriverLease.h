@@ -25,7 +25,8 @@ enum class EFU_NetDriverLeaseResult : uint8
 	NotGameThread,
 	OwnerUnavailable,
 	Restored,
-	ReleaseDeferred
+	ReleaseDeferred,
+	RestartRequired
 };
 
 /**
@@ -74,6 +75,8 @@ struct FFU_NetDriverLeasePreflight
 	bool bSameProvider = false;
 	bool bSameDesiredDriver = true;
 	bool bInstalledValueStillMatches = false;
+	bool bRequestedProviderRestartRequired = false;
+	bool bExistingLeaseProviderRestartRequired = false;
 };
 
 /**
@@ -84,9 +87,27 @@ struct FFU_NetDriverLeaseReleaseSnapshot
 	bool bIsGameThread = false;
 	bool bOwnerValid = false;
 	bool bProcessLeasePoisoned = false;
+	bool bProviderRestartRequired = false;
 	bool bLeaseExists = false;
 	bool bSameOwner = false;
 	bool bSameProvider = false;
+};
+
+/**
+ * 进程级、Provider 精确的不可取消操作阻断表。
+ *
+ * Subsystem 析构后不能继续保留 UObject delegate，因此无法再从迟到 OSS 回调取得终态。
+ * 一旦登记，对应 Provider 在本进程余生只能 fail-closed；类型刻意不提供 Clear，唯一恢复方式是重启进程。
+ * Steam/LAN 位彼此独立，避免一个 Provider 的未知终态污染另一个 Provider 的诊断事实。
+ */
+struct FFU_NetDriverLeaseUncertainOperationBlockers
+{
+	void Register(EFU_OnlineProvider Provider);
+	bool IsRestartRequired(EFU_OnlineProvider Provider) const;
+
+private:
+	bool bSteamRestartRequired = false;
+	bool bLanRestartRequired = false;
 };
 
 /**
@@ -137,6 +158,13 @@ public:
 		EFU_OnlineProvider Provider,
 		const TCHAR* Reason);
 	static void TickDeferredRelease();
+
+	/**
+	 * 在解除即将析构的 UObject 委托之前登记未知 OSS 终态。
+	 * 登记后不会自动清除；同 Provider 的释放、恢复与新 Owner 获取都会明确返回/保持 RestartRequired。
+	 */
+	static void RegisterUncertainOperation(EFU_OnlineProvider Provider, const TCHAR* Reason);
+	static bool IsProviderRestartRequired(EFU_OnlineProvider Provider);
 
 	/**
 	 * 只读确认进程级租约已经完全不存在；错误线程、poisoned 状态或任意现存租约都保守返回 false。

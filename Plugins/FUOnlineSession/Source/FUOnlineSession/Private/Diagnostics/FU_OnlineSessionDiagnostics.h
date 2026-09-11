@@ -77,6 +77,13 @@ public:
 	/** 可独立测试的统一脱敏入口，保证所有输出使用同一套规则。 */
 	static FFU_OnlineDiagnosticEvent Sanitize(const FFU_OnlineDiagnosticEvent& CandidateEvent);
 
+	/**
+	 * 为 TryRecoverProvider 的非法枚举生成固定、无调用参数的安全诊断；合法 Provider 返回 unset。
+	 * 纯构造函数让拒绝路径可测试，实际公开观察仍统一经过 Emit 的日志/历史/Blueprint 出口。
+	 */
+	static TOptional<FFU_OnlineDiagnosticEvent> BuildUnsupportedRecoveryProviderDiagnostic(
+		EFU_OnlineProvider Provider);
+
 	/** Viewport 存在时才创建资产无关的 Slate 浮层；传入 nullptr 等价于解绑。 */
 	void AttachViewport(UGameViewportClient* InViewport);
 	void DetachViewport();

@@ -23,6 +23,9 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 	// 【保守失败】一旦第三方在租约期间改写了定义/数组，进程余生都不再触碰 GameNetDriver。
 	// 这比“猜测如何恢复”安全，使用者可重启进程取得干净引擎状态。
 	bool bProcessLeasePoisoned = false;
+	// Subsystem 析构会解除 UObject delegate，之后无法证明迟到 OSS 请求的终态；
+	// 该表按 Provider 永久登记未知事实，不依赖已析构 Owner 的弱指针生命周期。
+	FFU_NetDriverLeaseUncertainOperationBlockers GUncertainOperationBlockers;
 	// RemoveTicker 在当前 ticker 回调内部调用会等待自身结束，因此必须区分“由回调自然返回 false”与外部撤销。
 	bool bInsideDeferredReleaseTicker = false;
 
@@ -44,6 +47,7 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 		case EFU_NetDriverLeaseResult::OwnerUnavailable: return TEXT("OwnerUnavailable");
 		case EFU_NetDriverLeaseResult::Restored: return TEXT("Restored");
 		case EFU_NetDriverLeaseResult::ReleaseDeferred: return TEXT("ReleaseDeferred");
+		case EFU_NetDriverLeaseResult::RestartRequired: return TEXT("RestartRequired");
 		default: return TEXT("Unknown");
 		}
 	}
@@ -163,6 +167,8 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 	{
 		FFU_NetDriverLeasePreflight Result;
 		Result.bIsGameThread = IsInGameThread();
+		Result.bRequestedProviderRestartRequired =
+			GUncertainOperationBlockers.IsRestartRequired(Provider);
 		if (!Result.bIsGameThread || !GEngine)
 		{
 			return Result;
@@ -218,6 +224,8 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 					&& GLease->Fingerprint.InstalledValue.DriverClassNameFallback == DesiredDriverClass);
 			const FFU_NetDriverLeaseFingerprint Current = CaptureFingerprintAtIndex(GLease->Fingerprint.DefinitionIndex);
 			Result.bInstalledValueStillMatches = HasSameDefinitionIdentity(GLease->Fingerprint, Current);
+			Result.bExistingLeaseProviderRestartRequired =
+				GUncertainOperationBlockers.IsRestartRequired(GLease->Provider);
 		}
 
 		return Result;
@@ -237,6 +245,12 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 		if (!IsInGameThread())
 		{
 			return EFU_NetDriverLeaseResult::NotGameThread;
+		}
+		if (GUncertainOperationBlockers.IsRestartRequired(GLease->Provider))
+		{
+			// 已解绑的 UObject 不再有可靠回调证明；即使所有 World 暂时清空，也不能把
+			// “当前没有驱动”误当成旧 OSS 请求已终止。该租约保持安装态直到进程重启。
+			return EFU_NetDriverLeaseResult::RestartRequired;
 		}
 
 		const FFU_NetDriverLeaseFingerprint Current =
@@ -294,6 +308,36 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 	}
 }
 
+void FFU_NetDriverLeaseUncertainOperationBlockers::Register(const EFU_OnlineProvider Provider)
+{
+	// 枚举来自编译期 Provider 模板；若未来错误地传入未知值，宁可同时阻断两端，
+	// 也不能把无法归属的旧 OSS 请求放行到任一进程级 NetDriver 配置。
+	switch (Provider)
+	{
+	case EFU_OnlineProvider::Steam:
+		bSteamRestartRequired = true;
+		break;
+	case EFU_OnlineProvider::Lan:
+		bLanRestartRequired = true;
+		break;
+	default:
+		bSteamRestartRequired = true;
+		bLanRestartRequired = true;
+		break;
+	}
+}
+
+bool FFU_NetDriverLeaseUncertainOperationBlockers::IsRestartRequired(
+	const EFU_OnlineProvider Provider) const
+{
+	switch (Provider)
+	{
+	case EFU_OnlineProvider::Steam: return bSteamRestartRequired;
+	case EFU_OnlineProvider::Lan: return bLanRestartRequired;
+	default: return true;
+	}
+}
+
 FFU_NetDriverDefinitionValue FFU_NetDriverDefinitionValue::FromDefinition(const FNetDriverDefinition& Definition)
 {
 	FFU_NetDriverDefinitionValue Result;
@@ -331,6 +375,13 @@ EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::EvaluateAcquire(
 	if (!Snapshot.bIsGameThread)
 	{
 		return EFU_NetDriverLeaseResult::NotGameThread;
+	}
+	if (Snapshot.bRequestedProviderRestartRequired
+		|| Snapshot.bExistingLeaseProviderRestartRequired)
+	{
+		// 请求 Provider 自身未知时，新 Owner 不能绕过；若现存租约所属 Provider 未知，
+		// 即使本次请求来自另一 Provider，也不能先恢复那份旧全局定义来实施 stale-owner reclaim。
+		return EFU_NetDriverLeaseResult::RestartRequired;
 	}
 
 	if (Snapshot.bLeaseExists)
@@ -405,6 +456,7 @@ bool FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(
 	return Snapshot.bIsGameThread
 		&& Snapshot.bOwnerValid
 		&& !Snapshot.bProcessLeasePoisoned
+		&& !Snapshot.bProviderRestartRequired
 		&& !Snapshot.bLeaseExists;
 }
 
@@ -572,6 +624,23 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 			Reason ? Reason : TEXT("Unknown"));
 		return;
 	}
+	if (GUncertainOperationBlockers.IsRestartRequired(Provider))
+	{
+		// 终态未知 blocker 不可自动清除，也不可继续保留一个永远重试的 ticker；
+		// 保留租约与当前安装值，明确要求重启，避免迟到成功使用已被恢复/改写的 GameNetDriver。
+		if (GLease->DeferredReleaseTicker.IsValid())
+		{
+			FTSTicker::RemoveTicker(GLease->DeferredReleaseTicker);
+			GLease->DeferredReleaseTicker.Reset();
+		}
+		GLease->bReleaseRequested = false;
+		UE_LOG(
+			LogFUOnlineSession,
+			Error,
+			TEXT("拒绝释放 GameNetDriver：Provider 存在析构后未知 OSS 操作，必须重启进程。Reason=%s"),
+			Reason ? Reason : TEXT("Unknown"));
+		return;
+	}
 
 	GLease->bReleaseRequested = true;
 	UE_LOG(LogFUOnlineSession, Display, TEXT("请求释放 GameNetDriver 租约：%s"), Reason ? Reason : TEXT("Unknown"));
@@ -581,6 +650,39 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 	{
 		EnsureDeferredReleaseTicker();
 	}
+}
+
+void FFU_OnlineSessionNetDriverLease::RegisterUncertainOperation(
+	const EFU_OnlineProvider Provider,
+	const TCHAR* Reason)
+{
+	using namespace FUOnlineSessionNetDriverLeasePrivate;
+	// GameInstanceSubsystem::Deinitialize 正常位于游戏线程；错误线程无法安全检查/撤销 ticker，
+	// 但 blocker 本身仍必须登记为进程事实，不能因生命周期调用异常而放行后续新 Owner。
+	GUncertainOperationBlockers.Register(Provider);
+
+	if (IsInGameThread() && GLease.IsSet() && GLease->Provider == Provider)
+	{
+		if (GLease->DeferredReleaseTicker.IsValid())
+		{
+			FTSTicker::RemoveTicker(GLease->DeferredReleaseTicker);
+			GLease->DeferredReleaseTicker.Reset();
+		}
+		GLease->bReleaseRequested = false;
+	}
+
+	UE_LOG(
+		LogFUOnlineSession,
+		Error,
+		TEXT("登记 Provider 析构后未知 OSS 操作：Provider=%s Reason=%s。为避免迟到成功破坏租约，本进程必须重启。"),
+		Provider == EFU_OnlineProvider::Steam ? TEXT("Steam") : TEXT("Lan/NULL"),
+		Reason ? Reason : TEXT("Unknown"));
+}
+
+bool FFU_OnlineSessionNetDriverLease::IsProviderRestartRequired(
+	const EFU_OnlineProvider Provider)
+{
+	return FUOnlineSessionNetDriverLeasePrivate::GUncertainOperationBlockers.IsRestartRequired(Provider);
 }
 
 void FFU_OnlineSessionNetDriverLease::TickDeferredRelease()
@@ -621,6 +723,7 @@ bool FFU_OnlineSessionNetDriverLease::IsReleaseComplete(
 	}
 
 	Snapshot.bProcessLeasePoisoned = bProcessLeasePoisoned;
+	Snapshot.bProviderRestartRequired = GUncertainOperationBlockers.IsRestartRequired(Provider);
 	Snapshot.bLeaseExists = GLease.IsSet();
 	if (GLease.IsSet())
 	{

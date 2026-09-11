@@ -2112,6 +2112,13 @@ bool UFU_OnlineSessionSubsystem::TryRecoverProvider(const EFU_OnlineProvider Pro
 	case EFU_OnlineProvider::Lan:
 		return FU_TryRecoverProvider<EFU_OnlineProvider::Lan>();
 	default:
+		// 非法枚举拒绝只通过统一诊断出口公开观察；builder 不读取 ProviderState，
+		// 因而不会改变 Steam/LAN 的 generation、timer、delegate、pending 或完成状态。
+		if (const TOptional<FFU_OnlineDiagnosticEvent> Event =
+			FFU_OnlineSessionDiagnostics::BuildUnsupportedRecoveryProviderDiagnostic(Provider))
+		{
+			FU_EmitDiagnostic(Event.GetValue());
+		}
 		return false;
 	}
 }
@@ -2124,6 +2131,34 @@ TOptional<EFU_OnlineProvider> UFU_OnlineSessionSubsystem::FU_GetFailureProvider(
 	}
 
 	return PreparedNetDriverProvider;
+}
+
+bool UFU_OnlineSessionSubsystem::FU_CanReleaseNetDriverAfterConnectionFailure(
+	const EFU_OnlineProvider Provider) const
+{
+	// 运行态 Provider 仍由两个模板实例各自保存；这里只把精确实例的只读证据折叠成纯快照，
+	// 不尝试重新取得接口，也不改变任何 pending/delegate/state-machine 字段。
+	const FFU_OnlineProviderState* ProviderState = nullptr;
+	switch (Provider)
+	{
+	case EFU_OnlineProvider::Steam:
+		ProviderState = &SteamState;
+		break;
+	case EFU_OnlineProvider::Lan:
+		ProviderState = &LanState;
+		break;
+	default:
+		return false;
+	}
+
+	FFU_ConnectionFailureLeaseReleaseSnapshot Snapshot;
+	Snapshot.bSessionInterfaceValid = ProviderState->SessionInterface.IsValid();
+	Snapshot.bNamedSessionAbsent = Snapshot.bSessionInterfaceValid
+		&& ProviderState->SessionInterface->GetNamedSession(NAME_GameSession) == nullptr;
+	Snapshot.bNoOperationInFlight = !ProviderState->OperationMachine.IsValid()
+		|| !ProviderState->OperationMachine->Get().bAwaitingOriginalCompletion;
+	Snapshot.bAllWorldsClear = FFU_OnlineSessionNetDriverLease::AreAllWorldsClearForRecovery();
+	return FFU_OnlineOperationStateMachine::CanReleaseLeaseAfterConnectionFailure(Snapshot);
 }
 
 void UFU_OnlineSessionSubsystem::FU_RequestNetDriverLeaseRelease(
@@ -2244,14 +2279,10 @@ void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 	DiagnosticEvent.Fields.Add(MoveTemp(NetDriverField));
 	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
 
-	const FFU_OnlineProviderState& ProviderState = Provider.GetValue() == EFU_OnlineProvider::Steam
-		? SteamState
-		: LanState;
-	const bool bOriginalOperationOutstanding = ProviderState.OperationMachine.IsValid()
-		&& ProviderState.OperationMachine->Get().bAwaitingOriginalCompletion;
-	if (!bOriginalOperationOutstanding)
+	if (FU_CanReleaseNetDriverAfterConnectionFailure(Provider.GetValue()))
 	{
-		// 只有没有不可取消 OSS 原回调在途时才可请求释放；否则下一帧迟到成功仍可能创建/使用 Session。
+		// 四项安全证据在同一游戏线程快照内同时成立；NamedSession 仍在时必定走保留分支，
+		// 等待显式 Destroy 或受控恢复，而不是把网络断开误当成会话已经删除。
 		FU_RequestNetDriverLeaseRelease(Provider.GetValue(), TEXT("Network failure"));
 	}
 
@@ -2301,14 +2332,10 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 	DiagnosticEvent.Fields.Add(MoveTemp(FailureTypeField));
 	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
 
-	const FFU_OnlineProviderState& ProviderState = Provider.GetValue() == EFU_OnlineProvider::Steam
-		? SteamState
-		: LanState;
-	const bool bOriginalOperationOutstanding = ProviderState.OperationMachine.IsValid()
-		&& ProviderState.OperationMachine->Get().bAwaitingOriginalCompletion;
-	if (!bOriginalOperationOutstanding)
+	if (FU_CanReleaseNetDriverAfterConnectionFailure(Provider.GetValue()))
 	{
-		// Travel 失败可能留下 PendingNetGame；协调器仍会等待全 World 安全，但不能越过在途 OSS 回调。
+		// Travel 失败还可能保留 ActiveNetDriver/PendingNetGame/NextURL；全 World 扫描与
+		// Session/操作证据必须同时通过，不能仅依赖延迟 ticker 在未来看到 World 为空。
 		FU_RequestNetDriverLeaseRelease(Provider.GetValue(), TEXT("Travel failure"));
 	}
 
@@ -2321,22 +2348,45 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 void UFU_OnlineSessionSubsystem::Deinitialize()
 {
 	const TOptional<EFU_OnlineProvider> LeaseProviderToRelease = PreparedNetDriverProvider;
-	// 析构不能假装未完成操作成功终止；先把不确定 generation 写入仍存活的诊断历史。
-	auto EmitDeinitializeUncertain = [this](const EFU_OnlineProvider Provider, const FFU_OnlineProviderState& State)
+	// 析构不能假装未完成操作成功终止；在解绑 UObject delegate 前，先把仍等待原 OSS 回调的
+	// generation 登记到进程级 Provider blocker。解绑后已不存在可靠外部终态证明，因此该 blocker
+	// 永不自动清除，只能通过重启进程恢复；这正是阻止 stale-owner reclaim 的跨生命周期证据。
+	auto RegisterDeinitializeUncertainty = [this](
+		const EFU_OnlineProvider Provider,
+		const FFU_OnlineProviderState& State)
 	{
 		if (State.OperationMachine.IsValid()
 			&& State.OperationMachine->Get().Phase != EFU_OperationPhase::Idle)
 		{
 			const FFU_OperationState& Operation = State.OperationMachine->Get();
+			const bool bTerminalCallbackUnknown = Operation.bAwaitingOriginalCompletion;
+			if (bTerminalCallbackUnknown)
+			{
+				FFU_OnlineSessionNetDriverLease::RegisterUncertainOperation(
+					Provider,
+					TEXT("GameInstanceSubsystem deinitialize with OSS callback outstanding"));
+			}
+
 			FU_EmitOperationDiagnostic(
 				Provider, Operation.ActiveKind, Operation.ActiveOperationId,
-				EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning,
-				TEXT("FU.Operation.DeinitializeUncertain"),
-				FString::Printf(TEXT("Subsystem 析构时操作尚未确定终止 Generation=%llu"), Operation.ActiveGeneration));
+				EFU_OnlineDiagnosticPhase::Recovery,
+				bTerminalCallbackUnknown
+					? EFU_OnlineDiagnosticSeverity::Error
+					: EFU_OnlineDiagnosticSeverity::Warning,
+				bTerminalCallbackUnknown
+					? TEXT("FU.Operation.DeinitializeUncertain.RestartRequired")
+					: TEXT("FU.Operation.DeinitializeRecovering"),
+				bTerminalCallbackUnknown
+					? FString::Printf(
+						TEXT("Subsystem 析构时 OSS 终态未知 Generation=%llu；已阻断该 Provider 的租约释放与新 Owner 获取，必须重启进程"),
+						Operation.ActiveGeneration)
+					: FString::Printf(
+						TEXT("Subsystem 析构时操作仍处于 Recovering 但无原回调在途 Generation=%llu"),
+						Operation.ActiveGeneration));
 		}
 	};
-	EmitDeinitializeUncertain(EFU_OnlineProvider::Steam, SteamState);
-	EmitDeinitializeUncertain(EFU_OnlineProvider::Lan, LanState);
+	RegisterDeinitializeUncertainty(EFU_OnlineProvider::Steam, SteamState);
+	RegisterDeinitializeUncertainty(EFU_OnlineProvider::Lan, LanState);
 
 	// 引擎委托的生命周期长于 GameInstanceSubsystem，必须先解绑，避免对象销毁后仍收到回调。
 	if (GEngine)
@@ -2358,7 +2408,8 @@ void UFU_OnlineSessionSubsystem::Deinitialize()
 	FU_ClearProviderState<EFU_OnlineProvider::Steam>();
 	FU_ClearProviderState<EFU_OnlineProvider::Lan>();
 
-	// 所有本对象回调入口已解除后才请求进程级租约恢复；协调器仍会等待全部 World/PendingTravel 清空。
+	// 所有本对象回调入口已解除后才请求进程级租约恢复；若上面登记了同 Provider blocker，
+	// RequestRelease 会明确拒绝并保留安装值，不会因弱 Owner 随后失效而被新 GameInstance 回收。
 	if (LeaseProviderToRelease.IsSet())
 	{
 		FU_RequestNetDriverLeaseRelease(

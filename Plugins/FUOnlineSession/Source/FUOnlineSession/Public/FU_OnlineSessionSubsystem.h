@@ -367,6 +367,12 @@ private:
 	TOptional<EFU_OnlineProvider> FU_GetFailureProvider() const;
 
 	/**
+	 * Network/TravelFailure 只在接口有效、NamedSession 已消失、无 OSS 回调在途且全 World 安全时释放。
+	 * 该门与普通 Destroy 完成路径分离，避免一次连接错误把仍被正式会话持有的进程租约提前恢复。
+	 */
+	bool FU_CanReleaseNetDriverAfterConnectionFailure(EFU_OnlineProvider Provider) const;
+
+	/**
 	 * 统一请求释放本 GameInstance 持有的进程级 NetDriver 租约。
 	 * 协调器会在任一 World 仍有驱动或 PendingNetGame 时延迟恢复，因此调用方不需要冒险强改 GEngine。
 	 */

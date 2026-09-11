@@ -70,6 +70,18 @@ struct FFU_OperationState
 };
 
 /**
+ * Network/TravelFailure 发生时请求恢复全局 NetDriver 租约所需的四项只读证据。
+ * 该值对象不持有 UObject/OSS 指针，便于用纯测试锁定“未知即不释放”的保守规则。
+ */
+struct FFU_ConnectionFailureLeaseReleaseSnapshot
+{
+	bool bSessionInterfaceValid = false;
+	bool bNamedSessionAbsent = false;
+	bool bNoOperationInFlight = false;
+	bool bAllWorldsClear = false;
+};
+
+/**
  * OnlineSubsystem 操作的无 UObject 状态机。
  * 所有 generation 检查都先于状态写入，迟到或重复回调只能得到 None，绝不会污染新请求。
  */
@@ -95,6 +107,10 @@ public:
 	bool IsExpectedCallback(uint64 Generation, EFU_OperationKind SubmittedKind) const;
 	bool CanFinishRecovery(bool bOriginalCallbackSeen, bool bNoSession) const;
 	bool CanStartExplicitRecovery(bool bOriginalCallbackSeen, bool bNoSession, bool bNoLiveOrPendingDriver, bool bLeaseReleased) const;
+
+	/** 只有接口、NamedSession、操作终态和全 World 网络状态四项证据同时安全时才允许失败路径释放。 */
+	static bool CanReleaseLeaseAfterConnectionFailure(
+		const FFU_ConnectionFailureLeaseReleaseSnapshot& Snapshot);
 
 	/** 自动补偿或一次显式重试真正绑定 Destroy 前，为其分配独立 generation。 */
 	bool BeginRecoveryDestroyAttempt(uint64& OutGeneration, bool bExplicitRetry = false);

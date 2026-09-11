@@ -158,6 +158,7 @@ EFU_OperationAction FFU_OnlineOperationStateMachine::HandleOriginalCompletion(
 
 	const EFU_OperationPhase PreviousPhase = State.Phase;
 	const EFU_OperationKind CompletedKind = State.ActiveKind;
+	const bool bFindCancellationWasOutstanding = State.bFindCancellationOutstanding;
 	State.bAwaitingOriginalCompletion = false;
 	State.bOriginalCallbackSeen = true;
 	State.bFindCancellationOutstanding = false;
@@ -203,6 +204,12 @@ EFU_OperationAction FFU_OnlineOperationStateMachine::HandleOriginalCompletion(
 	// Timeout 已经向蓝图完成失败，迟到回调只执行资源收敛，绝不再次广播或旅行。
 	if (CompletedKind == EFU_OperationKind::Find)
 	{
+		// 原 Find 与 CancelFindSessions 完成是竞争关系；若原 Find 先到，Cancel 的全局委托
+		// 仍然注册在接口上，必须由同一 generation 的动作显式清掉，避免随后误收另一轮取消结果。
+		if (bFindCancellationWasOutstanding)
+		{
+			Actions |= EFU_OperationAction::ClearFindCancellationDelegate;
+		}
 		State.Phase = EFU_OperationPhase::Idle;
 		return Actions;
 	}
@@ -256,6 +263,18 @@ bool FFU_OnlineOperationStateMachine::CanStartExplicitRecovery(
 	return CanFinishRecovery(bOriginalCallbackSeen, bNoSession)
 		&& bNoLiveOrPendingDriver
 		&& bLeaseReleased;
+}
+
+bool FFU_OnlineOperationStateMachine::CanReleaseLeaseAfterConnectionFailure(
+	const FFU_ConnectionFailureLeaseReleaseSnapshot& Snapshot)
+{
+	// Network/TravelFailure 只能说明一次连接或旅行失败，不能证明 OnlineSubsystem 已删除 NamedSession。
+	// 四项证据采用全 AND：任何接口未知、会话仍在、回调仍在途或全局 World 尚可能创建驱动，
+	// 都保留租约，交由显式 Destroy/受控恢复路径在取得可靠终态后处理。
+	return Snapshot.bSessionInterfaceValid
+		&& Snapshot.bNamedSessionAbsent
+		&& Snapshot.bNoOperationInFlight
+		&& Snapshot.bAllWorldsClear;
 }
 
 bool FFU_OnlineOperationStateMachine::BeginRecoveryDestroyAttempt(

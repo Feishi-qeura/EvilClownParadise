@@ -445,6 +445,28 @@ FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::Sanitize(const FFU_Onlin
 	return Result;
 }
 
+TOptional<FFU_OnlineDiagnosticEvent> FFU_OnlineSessionDiagnostics::BuildUnsupportedRecoveryProviderDiagnostic(
+	const EFU_OnlineProvider Provider)
+{
+	if (Provider == EFU_OnlineProvider::Steam || Provider == EFU_OnlineProvider::Lan)
+	{
+		return TOptional<FFU_OnlineDiagnosticEvent>();
+	}
+
+	// 非法枚举可能来自损坏存档、反射调用或未来版本错配；事件故意不回显原始数值、
+	// 房间参数或连接上下文，只公开稳定错误码和修复方向，避免诊断路径扩大敏感输入面。
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::Recovery;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Preflight;
+	Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+	Event.Code = TEXT("FU.Recovery.Rejected.UnsupportedProvider");
+	Event.Status = TEXT("Rejected");
+	Event.Message = TEXT("TryRecoverProvider 收到不支持的 Provider，未读取或修改任何 Provider 状态");
+	Event.RecommendedAction = TEXT("检查 Blueprint 枚举接线或版本兼容性后重试");
+	return Event;
+}
+
 void FFU_OnlineSessionDiagnostics::AttachViewport(UGameViewportClient* InViewport)
 {
 	if (OverlayViewport.Get() == InViewport && OverlayWidget.IsValid())
