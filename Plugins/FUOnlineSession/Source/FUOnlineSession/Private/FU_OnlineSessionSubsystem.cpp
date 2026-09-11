@@ -998,6 +998,64 @@ void UFU_OnlineSessionSubsystem::FU_DestroySession(
     }
 }
 
+template<EFU_OnlineProvider Provider>
+void UFU_OnlineSessionSubsystem::FU_OnRecoveryDestroyComplete(
+	const FName SessionName,
+	const bool bWasSuccessful,
+	const uint64 Generation)
+{
+	FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
+	FFU_OnlineOperationStateMachine& Machine = FU_GetOperationMachine<Provider>();
+	const bool bSessionStillExists = State.SessionInterface.IsValid()
+		&& State.SessionInterface->GetNamedSession(NAME_GameSession) != nullptr;
+	const bool bDestroyReachedNoSession = bWasSuccessful && !bSessionStillExists;
+	// 【A2 stale gate】必须让状态机同时验证 SessionName、generation、kind、phase 后再取 ID；
+	// 真正 stale 的回调得到 None 并保持无事件、无清理，不能借用当前新操作身份。
+	const EFU_OperationAction Actions = SessionName == NAME_GameSession
+		? Machine.HandleOriginalCompletion(
+			Generation,
+			EFU_OperationKind::Destroy,
+			bDestroyReachedNoSession,
+			bSessionStillExists)
+		: EFU_OperationAction::None;
+	if (Actions == EFU_OperationAction::None)
+	{
+		return;
+	}
+
+	const FGuid OperationId = Machine.Get().ActiveOperationId;
+	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+		Provider,
+		OperationId,
+		bDestroyReachedNoSession
+			? EFU_RecoveryDestroyDiagnosticOutcome::CallbackSucceeded
+			: EFU_RecoveryDestroyDiagnosticOutcome::CallbackFailed,
+		bSessionStillExists,
+		Actions));
+
+	// 状态机 action 是清理唯一真相；诊断已同步发出后才可触碰对应 generation 的资源。
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
+	{
+		FU_ClearOperationWatchdog<Provider>();
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearOriginalDelegate))
+	{
+		FU_ClearDestroyDelegate<Provider>();
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearPendingData))
+	{
+		State.PendingOperation = EFU_PendingOperation::None;
+	}
+	if (EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease))
+	{
+		if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() == Provider)
+		{
+			ActiveGameplayProvider.Reset();
+		}
+		FU_RequestNetDriverLeaseRelease(Provider, TEXT("Recovery Destroy reached terminal NoSession"));
+	}
+}
+
 //销毁完成后回调
 template<EFU_OnlineProvider Provider>
 void UFU_OnlineSessionSubsystem::FU_OnDestroySessionComplete(
@@ -1013,8 +1071,13 @@ void UFU_OnlineSessionSubsystem::FU_OnDestroySessionComplete(
 	{
 		return;
 	}
+	if (Machine.Get().Phase == EFU_OperationPhase::Recovering)
+	{
+		// 原始 Destroy 自身超时后仍绑定本回调；统一转入专用恢复处理，确保 phase/code/清理顺序一致。
+		FU_OnRecoveryDestroyComplete<Provider>(SessionName, bWasSuccessful, Generation);
+		return;
+	}
 
-	const bool bWasRecovering = Machine.Get().Phase == EFU_OperationPhase::Recovering;
 	const bool bSessionStillExists = State.SessionInterface.IsValid()
 		&& State.SessionInterface->GetNamedSession(NAME_GameSession) != nullptr;
 	const bool bDestroyReachedNoSession = bWasSuccessful && !bSessionStillExists;
@@ -1035,20 +1098,6 @@ void UFU_OnlineSessionSubsystem::FU_OnDestroySessionComplete(
 		bDestroyReachedNoSession ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning,
 		bDestroyReachedNoSession ? TEXT("FU.DestroySession.Completed") : TEXT("FU.DestroySession.Failed"),
 		bDestroyReachedNoSession ? TEXT("Destroy 回调确认命名会话已移除") : TEXT("Destroy 回调未能确认命名会话已移除"));
-
-	if (bWasRecovering)
-	{
-		// watchdog 已完成根 Blueprint 失败；迟到或补偿 Destroy 只负责收敛，不得重复广播或继续 Create/Join。
-		if (EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease))
-		{
-			if (ActiveGameplayProvider.IsSet() && ActiveGameplayProvider.GetValue() == Provider)
-			{
-				ActiveGameplayProvider.Reset();
-			}
-			FU_RequestNetDriverLeaseRelease(Provider, TEXT("Recovery Destroy reached terminal NoSession"));
-		}
-		return;
-	}
 
 	if (!bDestroyReachedNoSession)
 	{
@@ -1370,7 +1419,7 @@ void UFU_OnlineSessionSubsystem::FU_OnCreateSessionComplete(
 
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy))
 	{
-		FU_StartRecoveryDestroy<Provider>(false);
+		FU_BeginRecoveryDestroy<Provider>(false);
 	}
 }
 
@@ -1969,7 +2018,7 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
 	}
 	if (EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy))
 	{
-		FU_StartRecoveryDestroy<Provider>(false);
+		FU_BeginRecoveryDestroy<Provider>(false);
 	}
 }
 
@@ -2050,12 +2099,33 @@ void UFU_OnlineSessionSubsystem::FU_OnOperationTimeout(const uint64 Generation)
 {
 	FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
 	FFU_OnlineOperationStateMachine& Machine = FU_GetOperationMachine<Provider>();
-	const EFU_OperationKind SubmittedKind = Machine.Get().ActiveKind;
-	const EFU_OperationKind RootKind = Machine.Get().RootKind;
-	const FGuid OperationId = Machine.Get().ActiveOperationId;
+	const FFU_OperationState Snapshot = Machine.Get();
+	const EFU_OperationKind SubmittedKind = Snapshot.ActiveKind;
+	const EFU_OperationKind RootKind = Snapshot.RootKind;
+	const FGuid OperationId = Snapshot.ActiveOperationId;
+	const bool bRepeatedRecoveryDestroyTimeout =
+		Snapshot.Phase == EFU_OperationPhase::Recovering
+		&& Snapshot.ActiveKind == EFU_OperationKind::Destroy
+		&& Snapshot.bAwaitingOriginalCompletion;
 	const EFU_OperationAction Actions = Machine.HandleTimeout(Generation);
 	if (Actions == EFU_OperationAction::None)
 	{
+		return;
+	}
+	if (bRepeatedRecoveryDestroyTimeout)
+	{
+		// 根请求早已 exactly-once 失败；状态机只授权清 watchdog、保留原 Destroy delegate。
+		// 先用原 ID 发 Recovery 事件，再执行该精确清理，不得重复旧 completion 或自动重提 Destroy。
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+			Provider,
+			OperationId,
+			EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout,
+			false,
+			Actions));
+		if (EnumHasAnyFlags(Actions, EFU_OperationAction::ClearWatchdog))
+		{
+			FU_ClearOperationWatchdog<Provider>();
+		}
 		return;
 	}
 
@@ -2137,28 +2207,64 @@ void UFU_OnlineSessionSubsystem::FU_OnCancelFindSessionsComplete(
 }
 
 template<EFU_OnlineProvider Provider>
-bool UFU_OnlineSessionSubsystem::FU_StartRecoveryDestroy(const bool bExplicitRetry)
+bool UFU_OnlineSessionSubsystem::FU_BeginRecoveryDestroy(const bool bExplicitRetry)
 {
 	FFU_OnlineProviderState& State = FU_GetProviderState<Provider>();
 	FFU_OnlineOperationStateMachine& Machine = FU_GetOperationMachine<Provider>();
-	if (!State.SessionInterface.IsValid()
-		|| State.SessionInterface->GetNamedSession(NAME_GameSession) == nullptr)
+	const FFU_OperationState Snapshot = Machine.Get();
+	// 只有已经存在的根 operation 才能归因恢复事件；防御性无 ID 调用保持 no-op，
+	// 不能让 sanitizer 自动分配一个与真实根请求无关的新 ID。
+	if (!Snapshot.ActiveOperationId.IsValid())
 	{
+		return false;
+	}
+	if (!State.SessionInterface.IsValid())
+	{
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+			Provider,
+			Snapshot.ActiveOperationId,
+			EFU_RecoveryDestroyDiagnosticOutcome::InterfaceUnavailable,
+			false,
+			EFU_OperationAction::None));
+		return false;
+	}
+	if (State.SessionInterface->GetNamedSession(NAME_GameSession) == nullptr)
+	{
+		// NoSession 只证明无需再提交 Destroy；最终 Idle 仍由 TryRecoverProvider 的 callback/driver/lease 四证据门决定。
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+			Provider,
+			Snapshot.ActiveOperationId,
+			EFU_RecoveryDestroyDiagnosticOutcome::NoSession,
+			false,
+			EFU_OperationAction::None));
 		return false;
 	}
 
 	uint64 RecoveryGeneration = 0;
 	if (!Machine.BeginRecoveryDestroyAttempt(RecoveryGeneration, bExplicitRetry))
 	{
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+			Provider,
+			Snapshot.ActiveOperationId,
+			EFU_RecoveryDestroyDiagnosticOutcome::StateRejected,
+			true,
+			EFU_OperationAction::None));
 		return false;
 	}
 
-	// generation 与尝试次数已在调用 OSS 前提交，防止同步回调/同步拒绝重复启动补偿循环。
+	// generation 与尝试次数已由状态机先提交，诊断同步可见之后才允许绑定 delegate/timer、
+	// 写 pending 并调用 OSS；Blueprint 重入只能观察到新的 recovery generation。
+	FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+		Provider,
+		Machine.Get().ActiveOperationId,
+		EFU_RecoveryDestroyDiagnosticOutcome::SubmitAccepted,
+		true,
+		EFU_OperationAction::None));
 	State.PendingOperation = EFU_PendingOperation::None;
 	State.DestroyDelegateHandle = State.SessionInterface->AddOnDestroySessionCompleteDelegate_Handle(
 		FOnDestroySessionCompleteDelegate::CreateUObject(
 			this,
-			&ThisClass::FU_OnDestroySessionComplete<Provider>,
+			&ThisClass::FU_OnRecoveryDestroyComplete<Provider>,
 			RecoveryGeneration));
 	FU_ArmOperationWatchdog<Provider>(RecoveryGeneration);
 	const bool bStarted = State.SessionInterface->DestroySession(NAME_GameSession);
@@ -2170,8 +2276,29 @@ bool UFU_OnlineSessionSubsystem::FU_StartRecoveryDestroy(const bool bExplicitRet
 			EFU_OperationKind::Destroy,
 			false,
 			bSessionStillExists);
-		FU_ClearOperationWatchdog<Provider>();
-		FU_ClearDestroyDelegate<Provider>();
+		if (RejectActions == EFU_OperationAction::None)
+		{
+			// 同步调用栈内若回调已经完成，它已通过专用回调发出可归因事件；这里不得重复关联。
+			return false;
+		}
+		FU_EmitDiagnostic<Provider>(FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+			Provider,
+			Machine.Get().ActiveOperationId,
+			EFU_RecoveryDestroyDiagnosticOutcome::SynchronousRejected,
+			bSessionStillExists,
+			RejectActions));
+		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::ClearWatchdog))
+		{
+			FU_ClearOperationWatchdog<Provider>();
+		}
+		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::ClearOriginalDelegate))
+		{
+			FU_ClearDestroyDelegate<Provider>();
+		}
+		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::ClearPendingData))
+		{
+			State.PendingOperation = EFU_PendingOperation::None;
+		}
 		if (EnumHasAnyFlags(RejectActions, EFU_OperationAction::RequestLeaseRelease))
 		{
 			FU_RequestNetDriverLeaseRelease(Provider, TEXT("Recovery Destroy rejected after reaching NoSession"));
@@ -2217,13 +2344,7 @@ bool UFU_OnlineSessionSubsystem::FU_TryRecoverProvider()
 			return false;
 		}
 
-		const bool bStarted = FU_StartRecoveryDestroy<Provider>(true);
-		FU_EmitDiagnostic<Provider>(
-			Snapshot.RootKind, Snapshot.ActiveOperationId,
-			EFU_OnlineDiagnosticPhase::Recovery,
-			bStarted ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Error,
-			bStarted ? TEXT("FU.Recovery.DestroySubmitted") : TEXT("FU.Recovery.DestroyRejected"),
-			bStarted ? TEXT("已提交一次受控恢复 Destroy；等待其原始回调") : TEXT("恢复 Destroy 未被 OSS 接收"));
+		FU_BeginRecoveryDestroy<Provider>(true);
 		return false;
 	}
 

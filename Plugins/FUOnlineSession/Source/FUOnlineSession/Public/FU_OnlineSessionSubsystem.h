@@ -338,6 +338,10 @@ private:
 	template<EFU_OnlineProvider Provider>
 	void FU_OnDestroySessionComplete(FName SessionName, bool bWasSuccessful, uint64 Generation);
 
+	/** Recovering 中的 Destroy 只做内部收敛，绝不触发旧完成或 Create/Join 续步。 */
+	template<EFU_OnlineProvider Provider>
+	void FU_OnRecoveryDestroyComplete(FName SessionName, bool bWasSuccessful, uint64 Generation);
+
 	template<EFU_OnlineProvider Provider>
 	void FU_OnCancelFindSessionsComplete(bool bWasSuccessful, uint64 Generation);
 
@@ -430,7 +434,7 @@ private:
 	void FU_BroadcastOperationFailure(EFU_OperationKind RootKind);
 
 	template<EFU_OnlineProvider Provider>
-	bool FU_StartRecoveryDestroy(bool bExplicitRetry);
+	bool FU_BeginRecoveryDestroy(bool bExplicitRetry);
 
 	template<EFU_OnlineProvider Provider>
 	bool FU_TryRecoverProvider();

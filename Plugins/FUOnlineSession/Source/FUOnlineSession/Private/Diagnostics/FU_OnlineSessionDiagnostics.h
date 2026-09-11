@@ -137,6 +137,19 @@ enum class EFU_FindCancellationDiagnosticOutcome : uint8
 	FailedWaitingForOriginal
 };
 
+/** Recovery Destroy 的有限内部结果；所有分支都沿用根操作 ID，不接受 OSS 原始错误。 */
+enum class EFU_RecoveryDestroyDiagnosticOutcome : uint8
+{
+	InterfaceUnavailable,
+	NoSession,
+	StateRejected,
+	SubmitAccepted,
+	SynchronousRejected,
+	CallbackSucceeded,
+	CallbackFailed,
+	RepeatedTimeout
+};
+
 /**
  * A1 内部竞态的纯诊断 policy。Subsystem 的模板路径直接消费这些 builder，自动化测试也调用同一实现；
  * builder 只构造固定 code/status/message，不清 delegate、不改状态机，也不触发任何旧完成委托。
@@ -161,6 +174,13 @@ public:
 		EFU_OnlineProvider Provider,
 		const FGuid& OperationId,
 		EFU_FindCancellationDiagnosticOutcome Outcome);
+
+	static FFU_OnlineDiagnosticEvent BuildRecoveryDestroy(
+		EFU_OnlineProvider Provider,
+		const FGuid& OperationId,
+		EFU_RecoveryDestroyDiagnosticOutcome Outcome,
+		bool bSessionStillExists,
+		EFU_OperationAction Actions);
 };
 
 /**

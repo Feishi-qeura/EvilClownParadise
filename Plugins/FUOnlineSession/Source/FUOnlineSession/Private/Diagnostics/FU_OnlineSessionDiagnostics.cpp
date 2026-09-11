@@ -606,6 +606,86 @@ FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildFindCancellat
 	return Event;
 }
 
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+	const EFU_OnlineProvider Provider,
+	const FGuid& OperationId,
+	const EFU_RecoveryDestroyDiagnosticOutcome Outcome,
+	const bool bSessionStillExists,
+	const EFU_OperationAction Actions)
+{
+	// 【A2 纯 outcome policy】只消费已验证状态的有限布尔/action；不接收 DestroySession 的
+	// 原始 Provider 文本、会话标识或连接信息，所有输出可安全进入日志、历史和 Blueprint。
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::Recovery;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = EFU_OnlineDiagnosticSeverity::Info;
+	Event.RecommendedAction = TEXT("保持根请求 exactly-once；等待恢复 Destroy 回调及租约/World 安全证据后再完成恢复");
+	const bool bLeaseReleaseRequested =
+		EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease);
+
+	switch (Outcome)
+	{
+	case EFU_RecoveryDestroyDiagnosticOutcome::InterfaceUnavailable:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		Event.Code = TEXT("FU.Recovery.Destroy.InterfaceUnavailable");
+		Event.Status = TEXT("Blocked");
+		Event.Message = TEXT("Session Interface 不可用，无法安全提交恢复 Destroy");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::NoSession:
+		Event.Code = TEXT("FU.Recovery.Destroy.NoSession");
+		Event.Status = TEXT("NoDestroyNeeded");
+		Event.Message = TEXT("命名会话已不存在，无需提交恢复 Destroy；继续等待租约与 World 安全收敛");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::StateRejected:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.StateRejected");
+		Event.Status = TEXT("Rejected");
+		Event.Message = TEXT("状态机拒绝恢复 Destroy 提交；未绑定 delegate、timer 或修改 pending 数据");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::SubmitAccepted:
+		Event.Code = TEXT("FU.Recovery.Destroy.SubmitAccepted");
+		Event.Status = TEXT("Pending");
+		Event.Message = TEXT("状态机已接受恢复 Destroy generation；即将绑定精确 delegate 并提交 OSS 请求");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::SynchronousRejected:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.SynchronousRejected");
+		Event.Status = bLeaseReleaseRequested
+			? TEXT("LeaseReleaseRequested")
+			: bSessionStillExists ? TEXT("SessionStillExists") : TEXT("NoSessionObserved");
+		Event.Message = TEXT("DestroySession 同步返回 false；状态机已决定后续精确清理和租约动作");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::CallbackSucceeded:
+		Event.Code = TEXT("FU.Recovery.Destroy.CallbackSucceeded");
+		Event.Status = bLeaseReleaseRequested ? TEXT("LeaseReleaseRequested") : TEXT("NoSession");
+		Event.Message = TEXT("恢复 Destroy 回调确认命名会话已移除；状态机已授权会话层收敛");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::CallbackFailed:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.CallbackFailed");
+		Event.Status = bLeaseReleaseRequested
+			? TEXT("LeaseReleaseRequested")
+			: bSessionStillExists ? TEXT("SessionStillExists") : TEXT("NoSessionObserved");
+		Event.Message = TEXT("恢复 Destroy 回调未报告成功；状态机已按本地命名会话证据决定后续动作");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.RepeatedTimeout");
+		Event.Status = TEXT("WaitingForCallback");
+		Event.Message = TEXT("根请求失败后的恢复 Destroy 再次超时；保留原 Destroy delegate 等待真实终态");
+		break;
+	default:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		Event.Code = TEXT("FU.Recovery.Destroy.InvalidOutcome");
+		Event.Status = TEXT("Rejected");
+		Event.Message = TEXT("恢复 Destroy 诊断收到未支持的内部 outcome，未附带原始参数");
+		break;
+	}
+	return Event;
+}
+
 FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
 	const EFU_OnlineProvider Provider,
 	const EFU_OnlineDiagnosticOperation Operation,

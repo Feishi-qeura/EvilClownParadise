@@ -158,12 +158,41 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 			EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal,
 			TEXT("FU.FindSessions.Cancel.Failed"), TEXT("WaitingForOriginal") },
 	};
+	struct FRecoveryDestroyCase
+	{
+		EFU_RecoveryDestroyDiagnosticOutcome Outcome;
+		bool bSessionStillExists;
+		EFU_OperationAction Actions;
+		const TCHAR* Code;
+		const TCHAR* Status;
+	};
+	const FRecoveryDestroyCase RecoveryDestroyCases[] = {
+		{ EFU_RecoveryDestroyDiagnosticOutcome::InterfaceUnavailable, false, EFU_OperationAction::None,
+			TEXT("FU.Recovery.Destroy.InterfaceUnavailable"), TEXT("Blocked") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::NoSession, false, EFU_OperationAction::None,
+			TEXT("FU.Recovery.Destroy.NoSession"), TEXT("NoDestroyNeeded") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::StateRejected, true, EFU_OperationAction::None,
+			TEXT("FU.Recovery.Destroy.StateRejected"), TEXT("Rejected") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::SubmitAccepted, true, EFU_OperationAction::None,
+			TEXT("FU.Recovery.Destroy.SubmitAccepted"), TEXT("Pending") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::SynchronousRejected, true, EFU_OperationAction::None,
+			TEXT("FU.Recovery.Destroy.SynchronousRejected"), TEXT("SessionStillExists") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::SynchronousRejected, false, EFU_OperationAction::RequestLeaseRelease,
+			TEXT("FU.Recovery.Destroy.SynchronousRejected"), TEXT("LeaseReleaseRequested") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::CallbackSucceeded, false, EFU_OperationAction::RequestLeaseRelease,
+			TEXT("FU.Recovery.Destroy.CallbackSucceeded"), TEXT("LeaseReleaseRequested") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::CallbackFailed, true, EFU_OperationAction::None,
+			TEXT("FU.Recovery.Destroy.CallbackFailed"), TEXT("SessionStillExists") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::CallbackFailed, false, EFU_OperationAction::RequestLeaseRelease,
+			TEXT("FU.Recovery.Destroy.CallbackFailed"), TEXT("LeaseReleaseRequested") },
+		{ EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout, true, EFU_OperationAction::KeepOriginalDelegate,
+			TEXT("FU.Recovery.Destroy.RepeatedTimeout"), TEXT("WaitingForCallback") },
+	};
 
 	FFU_OnlineDiagnosticDispatchConfig Config;
 	Config.bEmitToLog = false;
 	Config.bEnableOverlay = false;
 	int32 DiagnosticBroadcastCount = 0;
-	int32 LegacyCompletionCount = 0;
 	FFU_OnlineSessionDiagnostics Diagnostics(
 		Config,
 		[&DiagnosticBroadcastCount](const FFU_OnlineDiagnosticEvent&)
@@ -208,11 +237,169 @@ bool FFUOnlineSessionOperationPathsTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("OperationPaths 全部属于 Recovery phase"), Emitted.Phase, EFU_OnlineDiagnosticPhase::Recovery);
 		TestEqual(TEXT("OperationPaths 沿用原有效 OperationId"), Emitted.OperationId, OperationId);
 	}
+	for (const FRecoveryDestroyCase& TestCase : RecoveryDestroyCases)
+	{
+		const FFU_OnlineDiagnosticEvent Emitted = Diagnostics.Emit(
+			FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+				EFU_OnlineProvider::Steam,
+				OperationId,
+				TestCase.Outcome,
+				TestCase.bSessionStillExists,
+				TestCase.Actions));
+		TestEqual(TEXT("Recovery Destroy 使用稳定 code"), Emitted.Code, FString(TestCase.Code));
+		TestEqual(TEXT("Recovery Destroy 使用准确 status"), Emitted.Status, FString(TestCase.Status));
+		TestEqual(TEXT("Recovery Destroy 全部属于 Recovery phase"), Emitted.Phase, EFU_OnlineDiagnosticPhase::Recovery);
+		TestEqual(TEXT("Recovery Destroy 沿用根请求 OperationId"), Emitted.OperationId, OperationId);
+	}
 	TestEqual(
 		TEXT("每个内部 outcome 恰好发出一条 Blueprint 诊断"),
 		DiagnosticBroadcastCount,
-		static_cast<int32>(UE_ARRAY_COUNT(Cases)));
-	TestEqual(TEXT("内部 outcome 诊断没有 legacy completion 副作用"), LegacyCompletionCount, 0);
+		static_cast<int32>(UE_ARRAY_COUNT(Cases) + UE_ARRAY_COUNT(RecoveryDestroyCases)));
+
+	// 【A1 reviewer RED：生产 dispatcher 的真实副作用缝】诊断 sink 会模拟 Blueprint 同步重入并换代；
+	// exact cleanup 必须仍清旧资源，而 shared cleanup、补偿 Destroy、legacy completion 与 travel
+	// 都不能误伤新 generation。每个计数器都实际传入 production dispatcher，禁止“未连接恒 0”。
+	enum class EDispatchPath : uint8
+	{
+		RecoveringCreate,
+		RecoveringJoin,
+		FindOriginalWins,
+		CancelSuccess,
+		CancelFailure,
+		RecoveryDestroyRepeatedTimeout,
+		StaleNoOp
+	};
+	struct FDispatchCase
+	{
+		EDispatchPath Path;
+		bool bReenterDuringDiagnostic;
+		bool bRequestRecoveryDestroy;
+		int32 ExpectedDiagnosticCount;
+		int32 ExpectedExactCleanupCount;
+		int32 ExpectedSharedCleanupCount;
+		int32 ExpectedRecoveryDestroyCount;
+		const TCHAR* ExpectedOrder;
+	};
+	const FDispatchCase DispatchCases[] = {
+		{ EDispatchPath::RecoveringCreate, false, true, 1, 1, 1, 1,
+			TEXT("Diagnostic,ExactCleanup,SharedCleanup,RecoveryDestroy") },
+		{ EDispatchPath::RecoveringJoin, false, true, 1, 1, 1, 1,
+			TEXT("Diagnostic,ExactCleanup,SharedCleanup,RecoveryDestroy") },
+		{ EDispatchPath::FindOriginalWins, true, false, 1, 1, 0, 0,
+			TEXT("Diagnostic,ExactCleanup") },
+		{ EDispatchPath::CancelSuccess, true, false, 1, 1, 0, 0,
+			TEXT("Diagnostic,ExactCleanup") },
+		{ EDispatchPath::CancelFailure, false, false, 1, 1, 1, 0,
+			TEXT("Diagnostic,ExactCleanup,SharedCleanup") },
+		{ EDispatchPath::RecoveryDestroyRepeatedTimeout, false, false, 1, 1, 1, 0,
+			TEXT("Diagnostic,ExactCleanup,SharedCleanup") },
+		{ EDispatchPath::StaleNoOp, false, true, 0, 0, 0, 0, TEXT("") },
+	};
+	for (const FDispatchCase& TestCase : DispatchCases)
+	{
+		TOptional<FFU_OnlineDiagnosticEvent> Event;
+		switch (TestCase.Path)
+		{
+		case EDispatchPath::RecoveringCreate:
+			Event = FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+				EFU_OnlineProvider::Steam, EFU_OnlineDiagnosticOperation::CreateSession,
+				OperationId, true, EFU_OperationAction::StartRecoveryDestroy);
+			break;
+		case EDispatchPath::RecoveringJoin:
+			Event = FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+				EFU_OnlineProvider::Steam, EFU_OnlineDiagnosticOperation::JoinSession,
+				OperationId, true, EFU_OperationAction::StartRecoveryDestroy);
+			break;
+		case EDispatchPath::FindOriginalWins:
+			Event = FFU_OnlineOperationPathDiagnostics::BuildRecoveringFindOriginal(
+				EFU_OnlineProvider::Steam, OperationId, true,
+				EFU_OperationAction::ClearFindCancellationDelegate);
+			break;
+		case EDispatchPath::CancelSuccess:
+			Event = FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+				EFU_OnlineProvider::Steam, OperationId,
+				EFU_FindCancellationDiagnosticOutcome::CancelWonRace);
+			break;
+		case EDispatchPath::CancelFailure:
+			Event = FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+				EFU_OnlineProvider::Steam, OperationId,
+				EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal);
+			break;
+		case EDispatchPath::RecoveryDestroyRepeatedTimeout:
+			Event = FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+				EFU_OnlineProvider::Steam, OperationId,
+				EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout,
+				true, EFU_OperationAction::KeepOriginalDelegate);
+			break;
+		case EDispatchPath::StaleNoOp:
+			break;
+		default:
+			AddError(TEXT("未覆盖的 dispatcher 测试路径"));
+			continue;
+		}
+
+		constexpr uint64 CompletedGeneration = 41;
+		uint64 CurrentGeneration = CompletedGeneration;
+		int32 CapturedOldResource = 100;
+		int32 SharedCurrentResource = 100;
+		int32 DiagnosticCount = 0;
+		int32 ExactCleanupCount = 0;
+		int32 SharedCleanupCount = 0;
+		int32 RecoveryDestroyCount = 0;
+		int32 LegacyCompletionCount = 0;
+		int32 TravelCount = 0;
+		TArray<FString> DispatchOrder;
+		FFU_OnlineOperationPathDispatchSinks Sinks;
+		Sinks.Diagnostic = [&](const FFU_OnlineDiagnosticEvent&)
+		{
+			DispatchOrder.Add(TEXT("Diagnostic"));
+			++DiagnosticCount;
+			if (TestCase.bReenterDuringDiagnostic)
+			{
+				// 模拟同步 Blueprint 回调启动新请求并安装新资源。
+				CurrentGeneration = CompletedGeneration + 1;
+				SharedCurrentResource = 200;
+			}
+		};
+		Sinks.CurrentGeneration = [&]() { return CurrentGeneration; };
+		Sinks.ExactOldResourceCleanup = [&]()
+		{
+			DispatchOrder.Add(TEXT("ExactCleanup"));
+			++ExactCleanupCount;
+			CapturedOldResource = 0;
+		};
+		Sinks.GenerationMatchedCleanup = [&]()
+		{
+			DispatchOrder.Add(TEXT("SharedCleanup"));
+			++SharedCleanupCount;
+			SharedCurrentResource = 0;
+		};
+		Sinks.RecoveryDestroySubmission = [&]()
+		{
+			DispatchOrder.Add(TEXT("RecoveryDestroy"));
+			++RecoveryDestroyCount;
+		};
+		Sinks.LegacyCompletion = [&]() { ++LegacyCompletionCount; };
+		Sinks.Travel = [&]() { ++TravelCount; };
+
+		FFU_OnlineOperationPathDispatcher::DispatchInternal(
+			Event,
+			CompletedGeneration,
+			TestCase.bRequestRecoveryDestroy,
+			Sinks);
+
+		TestEqual(TEXT("dispatcher diagnostic sink 次数"), DiagnosticCount, TestCase.ExpectedDiagnosticCount);
+		TestEqual(TEXT("dispatcher exact cleanup sink 次数"), ExactCleanupCount, TestCase.ExpectedExactCleanupCount);
+		TestEqual(TEXT("dispatcher shared cleanup sink 次数"), SharedCleanupCount, TestCase.ExpectedSharedCleanupCount);
+		TestEqual(TEXT("dispatcher recovery Destroy sink 次数"), RecoveryDestroyCount, TestCase.ExpectedRecoveryDestroyCount);
+		TestEqual(TEXT("内部 outcome 不触发 legacy completion sink"), LegacyCompletionCount, 0);
+		TestEqual(TEXT("内部 outcome 不触发 travel sink"), TravelCount, 0);
+		TestEqual(TEXT("dispatcher 顺序稳定"), FString::Join(DispatchOrder, TEXT(",")), FString(TestCase.ExpectedOrder));
+		TestEqual(TEXT("有效 outcome 必须清掉捕获的旧资源"), CapturedOldResource,
+			TestCase.ExpectedExactCleanupCount == 0 ? 100 : 0);
+		TestEqual(TEXT("重入后新 generation 的共享资源不被旧回调清理"), SharedCurrentResource,
+			TestCase.bReenterDuringDiagnostic ? 200 : (TestCase.ExpectedSharedCleanupCount == 0 ? 100 : 0));
+	}
 	return true;
 }
 
