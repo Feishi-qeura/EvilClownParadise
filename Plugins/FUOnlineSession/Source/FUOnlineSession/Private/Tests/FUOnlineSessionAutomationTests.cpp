@@ -744,6 +744,32 @@ bool FFUOnlineSessionDiagnosticHistoryTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("诊断报告能保存到受限 Saved/Logs 目录"), Diagnostics.SaveReport(SavedPath, SaveError));
 	TestTrue(TEXT("保存成功时报告文件存在"), IFileManager::Get().FileExists(*SavedPath));
 
+	// 【Characterization：公开 ClearDiagnosticHistory 只转发到此生产边界】Subsystem 需要有效
+	// GameInstance/Diagnostics 生命周期，隔离自动化不安全地构造它反而会伪造状态；这里让真实 active
+	// 状态机与同一个 FFU_OnlineSessionDiagnostics::ClearHistory 并存，逐字段锁定“清历史绝不触碰操作”。
+	FFU_OnlineOperationStateMachine ActiveMachine;
+	FFU_OperationTicket ActiveTicket = ActiveMachine.BeginAttempt(EFU_OperationKind::Join);
+	TestTrue(TEXT("清历史前可建立 active Join"), ActiveMachine.AcceptAttempt(ActiveTicket, EFU_OperationKind::Join));
+	const FFU_OperationState BeforeClear = ActiveMachine.Get();
+	Diagnostics.ClearHistory();
+	const FFU_OperationState AfterClear = ActiveMachine.Get();
+	TestEqual(TEXT("清历史后 history 为空"), Diagnostics.GetHistory().Num(), 0);
+	TestEqual(TEXT("清历史保持 AttemptSequence"), AfterClear.AttemptSequence, BeforeClear.AttemptSequence);
+	TestEqual(TEXT("清历史保持 ActiveGeneration"), AfterClear.ActiveGeneration, BeforeClear.ActiveGeneration);
+	TestEqual(TEXT("清历史保持 ActiveOperationId"), AfterClear.ActiveOperationId, BeforeClear.ActiveOperationId);
+	TestEqual(TEXT("清历史保持 ActiveKind"), AfterClear.ActiveKind, BeforeClear.ActiveKind);
+	TestEqual(TEXT("清历史保持 RootKind"), AfterClear.RootKind, BeforeClear.RootKind);
+	TestEqual(TEXT("清历史保持 Phase"), AfterClear.Phase, BeforeClear.Phase);
+	TestEqual(TEXT("清历史保持 CompletionBroadcast"), AfterClear.bCompletionBroadcast, BeforeClear.bCompletionBroadcast);
+	TestEqual(TEXT("清历史保持 AwaitingOriginalCompletion"), AfterClear.bAwaitingOriginalCompletion, BeforeClear.bAwaitingOriginalCompletion);
+	TestEqual(TEXT("清历史保持 FindCancellationOutstanding"), AfterClear.bFindCancellationOutstanding, BeforeClear.bFindCancellationOutstanding);
+	TestEqual(TEXT("清历史保持 RecoveryDestroyAttempts"), AfterClear.RecoveryDestroyAttempts, BeforeClear.RecoveryDestroyAttempts);
+	TestEqual(TEXT("清历史保持 OriginalCallbackSeen"), AfterClear.bOriginalCallbackSeen, BeforeClear.bOriginalCallbackSeen);
+	TestEqual(TEXT("清历史保持 GenerationSequence"), AfterClear.GenerationSequence, BeforeClear.GenerationSequence);
+	Diagnostics.Emit(SecondEvent);
+	TestEqual(TEXT("清历史后仍可继续记录"), Diagnostics.GetHistory().Num(), 1);
+	TestEqual(TEXT("清历史后仍可继续 Blueprint 广播"), BlueprintBroadcastCount, 5);
+
 	// 【Fix round 1 RED：非法 Provider 仍须公开可观察】决策函数对合法枚举不产生事件；
 	// 非法枚举只生成不含调用参数、凭据或连接信息的固定安全事件，再走统一脱敏/广播出口。
 	TestFalse(
@@ -761,7 +787,7 @@ bool FFUOnlineSessionDiagnosticHistoryTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("非法 Provider 诊断公开标记 Recovery"), EmittedUnsupported.Operation, EFU_OnlineDiagnosticOperation::Recovery);
 		TestEqual(TEXT("非法 Provider 诊断公开标记 Rejected"), EmittedUnsupported.Status, FString(TEXT("Rejected")));
 		TestTrue(TEXT("非法 Provider 诊断不携带可泄露字段"), EmittedUnsupported.Fields.IsEmpty());
-		TestEqual(TEXT("非法 Provider 诊断恰好通过 Blueprint 出口广播一次"), BlueprintBroadcastCount, 5);
+		TestEqual(TEXT("非法 Provider 诊断恰好通过 Blueprint 出口广播一次"), BlueprintBroadcastCount, 6);
 	}
 	return true;
 }
