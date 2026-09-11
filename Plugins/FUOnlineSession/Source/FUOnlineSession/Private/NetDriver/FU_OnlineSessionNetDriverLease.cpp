@@ -89,6 +89,8 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 		case EFU_NetDriverLeaseResult::Restored: return TEXT("Restored");
 		case EFU_NetDriverLeaseResult::ReleaseDeferred: return TEXT("ReleaseDeferred");
 		case EFU_NetDriverLeaseResult::RestartRequired: return TEXT("RestartRequired");
+		case EFU_NetDriverLeaseResult::NoLease: return TEXT("NoLease");
+		case EFU_NetDriverLeaseResult::NotOwner: return TEXT("NotOwner");
 		default: return TEXT("Unknown");
 		}
 	}
@@ -685,7 +687,7 @@ EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::Acquire(
 	return EFU_NetDriverLeaseResult::Acquired;
 }
 
-void FFU_OnlineSessionNetDriverLease::RequestRelease(
+EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::RequestRelease(
 	UGameInstance* Owner,
 	const EFU_OnlineProvider Provider,
 	const TCHAR* Reason)
@@ -696,7 +698,7 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 	if (!IsInGameThread())
 	{
 		UE_LOG(LogFUOnlineSession, Error, TEXT("拒绝从非游戏线程释放 GameNetDriver 租约"));
-		return;
+		return EFU_NetDriverLeaseResult::NotGameThread;
 	}
 	if (IsProviderRestartRequiredInCurrentProcess(Provider))
 	{
@@ -716,11 +718,11 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 			Error,
 			TEXT("拒绝释放 GameNetDriver：Provider 存在跨模块未知 OSS 操作，必须重启进程。Reason=%s"),
 			Reason ? Reason : TEXT("Unknown"));
-		return;
+		return EFU_NetDriverLeaseResult::RestartRequired;
 	}
 	if (!GLease.IsSet())
 	{
-		return;
+		return EFU_NetDriverLeaseResult::NoLease;
 	}
 
 	// 另一 GameInstance 不能释放当前租约；Owner=null 只允许在原 Owner 已失效的销毁收尾中使用。
@@ -744,7 +746,7 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 			TEXT("忽略非租约所有者的 GameNetDriver 释放请求：Provider=%s Reason=%s"),
 			Provider == EFU_OnlineProvider::Steam ? TEXT("Steam") : TEXT("Lan/NULL"),
 			Reason ? Reason : TEXT("Unknown"));
-		return;
+		return EFU_NetDriverLeaseResult::NotOwner;
 	}
 	GLease->bReleaseRequested = true;
 	UE_LOG(LogFUOnlineSession, Display, TEXT("请求释放 GameNetDriver 租约：%s"), Reason ? Reason : TEXT("Unknown"));
@@ -754,6 +756,7 @@ void FFU_OnlineSessionNetDriverLease::RequestRelease(
 	{
 		EnsureDeferredReleaseTicker();
 	}
+	return Result;
 }
 
 void FFU_OnlineSessionNetDriverLease::RegisterUncertainOperation(
@@ -889,7 +892,7 @@ void FFU_OnlineSessionNetDriverLease::ShutdownModule()
 			LogFUOnlineSession,
 			Error,
 			TEXT("Runtime 卸载时保留未知操作的 GameNetDriver 安装值；跨模块 blocker 仍有效，必须重启进程。"));
-		return;
+		return EFU_NetDriverLeaseResult::NotOwner;
 	}
 
 	// 模块卸载后不允许保留会回调已卸载代码的 ticker；仅尝试一次安全恢复，绝不强制覆盖。
@@ -921,4 +924,16 @@ bool FFU_OnlineSessionNetDriverLease::IsProbeSuccess(const EFU_NetDriverLeaseRes
 const TCHAR* FFU_OnlineSessionNetDriverLease::GetResultName(const EFU_NetDriverLeaseResult Result)
 {
 	return FUOnlineSessionNetDriverLeasePrivate::ToText(Result);
+}
+
+FFU_NetDriverLeaseDiagnosticOutcome FFU_OnlineSessionNetDriverLease::GetDiagnosticOutcome(const EFU_NetDriverLeaseResult Result)
+{
+	FFU_NetDriverLeaseDiagnosticOutcome Outcome;
+	Outcome.Status = GetResultName(Result);
+	Outcome.bIsError = !(Result == EFU_NetDriverLeaseResult::Acquired
+		|| Result == EFU_NetDriverLeaseResult::AlreadyOwned
+		|| Result == EFU_NetDriverLeaseResult::Restored);
+	Outcome.Code = Result == EFU_NetDriverLeaseResult::Acquired || Result == EFU_NetDriverLeaseResult::AlreadyOwned
+		? TEXT("FU.Lease.Acquire") : TEXT("FU.Lease.Release");
+	return Outcome;
 }

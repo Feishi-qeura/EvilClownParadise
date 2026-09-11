@@ -26,7 +26,17 @@ enum class EFU_NetDriverLeaseResult : uint8
 	OwnerUnavailable,
 	Restored,
 	ReleaseDeferred,
-	RestartRequired
+	RestartRequired,
+	NoLease,
+	NotOwner
+};
+
+/** coordinator 真实结果到稳定诊断语义的纯映射；不持有 Provider、Owner 或任何引擎定义。 */
+struct FFU_NetDriverLeaseDiagnosticOutcome
+{
+	FName Code;
+	FName Status;
+	bool bIsError = false;
 };
 
 /**
@@ -188,7 +198,7 @@ public:
 	 * 请求恢复而不是强制恢复；Owner 与 Provider 必须同时匹配，避免同一 GameInstance 的错误蓝图入口
 	 * 释放另一种 Provider 的租约。存在任一目标驱动、PendingNetGame 或已排队 Travel 时会由 ticker 延迟重试。
 	 */
-	static void RequestRelease(
+	static EFU_NetDriverLeaseResult RequestRelease(
 		UGameInstance* Owner,
 		EFU_OnlineProvider Provider,
 		const TCHAR* Reason);
@@ -217,4 +227,5 @@ public:
 	/** Probe 可把“失效旧 Owner 且当前安全”视为可尝试；Acquire 会先恢复旧基线再重新获取。 */
 	static bool IsProbeSuccess(EFU_NetDriverLeaseResult Result);
 	static const TCHAR* GetResultName(EFU_NetDriverLeaseResult Result);
+	static FFU_NetDriverLeaseDiagnosticOutcome GetDiagnosticOutcome(EFU_NetDriverLeaseResult Result);
 };

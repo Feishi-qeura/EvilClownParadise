@@ -296,7 +296,7 @@ private:
 	 * 函数必须在 OpenLevel(?listen) 或 ClientTravel 创建 NetDriver 之前调用。
 	 */
 	template<EFU_OnlineProvider Provider>
-	bool FU_PrepareGameNetDriver();
+	bool FU_PrepareGameNetDriver(EFU_OperationKind RootKind, const FGuid& OperationId);
 	
 	template<EFU_OnlineProvider Provider> 
 	void FU_CreateSession(int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword);
@@ -397,7 +397,7 @@ private:
 	 * 统一请求释放本 GameInstance 持有的进程级 NetDriver 租约。
 	 * 协调器会在任一 World 仍有驱动或 PendingNetGame 时延迟恢复，因此调用方不需要冒险强改 GEngine。
 	 */
-	void FU_RequestNetDriverLeaseRelease(EFU_OnlineProvider Provider, const TCHAR* Reason);
+	EFU_NetDriverLeaseResult FU_RequestNetDriverLeaseRelease(EFU_OnlineProvider Provider, const TCHAR* Reason);
 
 	/** 以下 helper 只在 generation/kind/phase 验证通过后操作精确资源，保证迟到回调不能清新请求。 */
 	template<EFU_OnlineProvider Provider>
