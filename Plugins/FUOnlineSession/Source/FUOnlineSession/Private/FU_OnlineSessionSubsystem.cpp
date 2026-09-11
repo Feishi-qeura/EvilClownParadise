@@ -15,6 +15,16 @@ namespace FUOnlineSession
 	const FName RoomPasswordSetting(TEXT("FU_RoomPassword"));
 }
 
+namespace
+{
+	// LAN broadcast only works for the Null provider; Steam sessions must use internet lobbies to be discoverable.
+	bool FU_UsesLanSessions(const UWorld* World)
+	{
+		const IOnlineSubsystem* OnlineSubsystem = Online::GetSubsystem(World);
+		return !OnlineSubsystem || (OnlineSubsystem->GetSubsystemName() != STEAM_SUBSYSTEM);
+	}
+}
+
 void UFU_OnlineSessionSubsystem::Deinitialize()
 {
 	// Shutdown can occur while provider callbacks are pending, so detach every delegate before releasing session state.
@@ -92,7 +102,7 @@ void UFU_OnlineSessionSubsystem::FindCustomSession(const FString& RoomName, cons
 
 	SessionSearch = MakeShared<FOnlineSessionSearch>();
 	SessionSearch->MaxSearchResults = MaxResults;
-	SessionSearch->bIsLanQuery = true;
+	SessionSearch->bIsLanQuery = FU_UsesLanSessions(GetWorld());
 	SessionSearch->QuerySettings.Set(SEARCH_LOBBIES, bUseLobbiesIfAvailable, EOnlineComparisonOp::Equals);
 	PendingRoomName = RoomName;
 	CachedSearchResults.Reset();
@@ -199,7 +209,7 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal()
 
 	FOnlineSessionSettings Settings;
 	Settings.NumPublicConnections = PendingMaxPlayers;
-	Settings.bIsLANMatch = true;
+	Settings.bIsLANMatch = FU_UsesLanSessions(GetWorld());
 	Settings.bShouldAdvertise = true;
 	Settings.bUsesPresence = true;
 	Settings.bUseLobbiesIfAvailable = bPendingUseLobbiesIfAvailable;
