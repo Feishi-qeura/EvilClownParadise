@@ -256,6 +256,7 @@ void UFU_OnlineSessionSubsystem::FU_OnFindSessionsComplete(const bool bWasSucces
 	FU_ClearFindDelegate();
 	TArray<FFU_SessionResult> BlueprintResults;
 	CachedSearchResults.Reset();
+	
 
 	if (bWasSuccessful && SessionSearch.IsValid())
 	{
