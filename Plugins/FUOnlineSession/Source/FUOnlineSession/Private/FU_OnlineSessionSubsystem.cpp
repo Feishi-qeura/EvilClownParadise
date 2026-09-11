@@ -1213,7 +1213,7 @@ void UFU_OnlineSessionSubsystem::FU_CreateSessionInternal(FFU_OperationTicket* R
 
 	// 【FU 修复：Host 传输层】CreateSession 完成后蓝图会 OpenLevel(?listen)。
 	// 必须在 Listen NetDriver 创建以前，根据模板 Provider 准备正确驱动。
-	if (!FU_PrepareGameNetDriver<Provider>(RootTicket.Kind, RootTicket.OperationId))
+	if (!FU_PrepareGameNetDriver<Provider>(RootTicket->Kind, RootTicket->OperationId))
 	{
 		State.PendingCreateRoomName.Reset();
 		State.PendingCreateRoomPassword.Reset();
@@ -1732,7 +1732,7 @@ void UFU_OnlineSessionSubsystem::FU_JoinSessionInternal(FFU_OperationTicket* Roo
 
 	// 【FU 修复：Client 传输层】JoinSession 成功回调会立即执行 ClientTravel，
 	// 因此必须在向 OnlineSubsystem 发起 Join 之前完成模板化 NetDriver 选择。
-	if (!FU_PrepareGameNetDriver<Provider>(RootTicket.Kind, RootTicket.OperationId))
+	if (!FU_PrepareGameNetDriver<Provider>(RootTicket->Kind, RootTicket->OperationId))
 	{
 		State.PendingJoinResult.Reset();
 		FU_RequestNetDriverLeaseRelease(Provider, TEXT("JoinSession NetDriver preparation failed"));
@@ -2387,11 +2387,11 @@ EFU_NetDriverLeaseResult UFU_OnlineSessionSubsystem::FU_RequestNetDriverLeaseRel
 	const FFU_NetDriverLeaseDiagnosticOutcome Outcome = FFU_OnlineSessionNetDriverLease::GetDiagnosticOutcome(Result);
 	if (Provider == EFU_OnlineProvider::Steam)
 	{
-		this->template FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
+		FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
 	}
 	else
 	{
-		this->template FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
+		FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
 	}
 	return Result;
 }

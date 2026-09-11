@@ -735,7 +735,7 @@ EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::RequestRelease(
 			Provider == EFU_OnlineProvider::Steam ? TEXT("Steam") : TEXT("Lan/NULL"),
 			GLease->Provider == EFU_OnlineProvider::Steam ? TEXT("Steam") : TEXT("Lan/NULL"),
 			Reason ? Reason : TEXT("Unknown"));
-		return;
+		return EFU_NetDriverLeaseResult::NotOwner;
 	}
 	if ((Owner != nullptr && GLease->Owner.Get() != Owner)
 		|| (Owner == nullptr && GLease->Owner.IsValid()))
@@ -746,7 +746,7 @@ EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::RequestRelease(
 			TEXT("忽略非租约所有者的 GameNetDriver 释放请求：Provider=%s Reason=%s"),
 			Provider == EFU_OnlineProvider::Steam ? TEXT("Steam") : TEXT("Lan/NULL"),
 			Reason ? Reason : TEXT("Unknown"));
-		return EFU_NetDriverLeaseResult::NotOwner;
+		return;
 	}
 	GLease->bReleaseRequested = true;
 	UE_LOG(LogFUOnlineSession, Display, TEXT("请求释放 GameNetDriver 租约：%s"), Reason ? Reason : TEXT("Unknown"));
@@ -892,7 +892,7 @@ void FFU_OnlineSessionNetDriverLease::ShutdownModule()
 			LogFUOnlineSession,
 			Error,
 			TEXT("Runtime 卸载时保留未知操作的 GameNetDriver 安装值；跨模块 blocker 仍有效，必须重启进程。"));
-		return EFU_NetDriverLeaseResult::NotOwner;
+		return;
 	}
 
 	// 模块卸载后不允许保留会回调已卸载代码的 ticker；仅尝试一次安全恢复，绝不强制覆盖。

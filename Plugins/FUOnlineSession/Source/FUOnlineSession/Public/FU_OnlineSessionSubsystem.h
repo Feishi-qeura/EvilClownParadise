@@ -18,6 +18,7 @@ class FFU_OnlineSessionDiagnostics;
 class FFU_OnlineOperationStateMachine;
 struct FFU_OperationTicket;
 enum class EFU_OperationKind : uint8;
+enum class EFU_NetDriverLeaseResult : uint8;
 
 /**
  * 诊断分发器是 Private 实现；自定义删除器避免把私有 Slate/文件实现暴露到 Public 头，
