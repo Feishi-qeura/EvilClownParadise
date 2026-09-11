@@ -2387,11 +2387,11 @@ EFU_NetDriverLeaseResult UFU_OnlineSessionSubsystem::FU_RequestNetDriverLeaseRel
 	const FFU_NetDriverLeaseDiagnosticOutcome Outcome = FFU_OnlineSessionNetDriverLease::GetDiagnosticOutcome(Result);
 	if (Provider == EFU_OnlineProvider::Steam)
 	{
-		FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
+		this->template FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
 	}
 	else
 	{
-		FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
+		this->template FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(State.OperationMachine.IsValid() ? State.OperationMachine->Get().RootKind : EFU_OperationKind::Destroy, OperationId, EFU_OnlineDiagnosticPhase::Recovery, Outcome.bIsError ? EFU_OnlineDiagnosticSeverity::Warning : EFU_OnlineDiagnosticSeverity::Info, *Outcome.Code.ToString(), TEXT("GameNetDriver 租约协调器已完成 Release 决策"), FString(), *Outcome.Status.ToString());
 	}
 	return Result;
 }
@@ -2523,7 +2523,7 @@ void UFU_OnlineSessionSubsystem::FU_EmitEnvironmentDiagnostic(
 	FU_EmitDiagnostic(MoveTemp(Event));
 }
 
-void UFU_OnlineSessionSubsystem::FU_EmitConnectionFailureDiagnostic(
+FGuid UFU_OnlineSessionSubsystem::FU_EmitConnectionFailureDiagnostic(
 	const EFU_OnlineProvider Provider,
 	const bool bIsTravelFailure,
 	const TCHAR* StableStatus)
@@ -2535,7 +2535,7 @@ void UFU_OnlineSessionSubsystem::FU_EmitConnectionFailureDiagnostic(
 	{
 	case EFU_OnlineProvider::Steam: State = &SteamState; break;
 	case EFU_OnlineProvider::Lan: State = &LanState; break;
-	default: return;
+	default: return FGuid();
 	}
 	const EFU_OperationKind Kind = State->OperationMachine.IsValid()
 		? State->OperationMachine->Get().RootKind
@@ -2561,6 +2561,7 @@ void UFU_OnlineSessionSubsystem::FU_EmitConnectionFailureDiagnostic(
 	default:
 		break;
 	}
+	return OperationId;
 }
 
 void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
@@ -2584,7 +2585,7 @@ void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 	// 【安全边界】引擎 ErrorString 可能包含连接串、Travel URL 或 token，绝不能先直写 UE_LOG。
 	// 只公开稳定 FailureType；详细原文不进入日志、浮层、历史或 Blueprint 任一 sink。
 	const FString SafeStatus = ENetworkFailure::ToString(FailureType);
-	FU_EmitConnectionFailureDiagnostic(Provider.GetValue(), false, *SafeStatus);
+	const FGuid FailureOperationId = FU_EmitConnectionFailureDiagnostic(Provider.GetValue(), false, *SafeStatus);
 	const FString FailureMessage = FString::Printf(TEXT("网络连接失败：%s"), *SafeStatus);
 
 	if (FU_CanReleaseNetDriverAfterConnectionFailure(Provider.GetValue()))
@@ -2592,6 +2593,14 @@ void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 		// 四项安全证据在同一游戏线程快照内同时成立；NamedSession 仍在时必定走保留分支，
 		// 等待显式 Destroy 或受控恢复，而不是把网络断开误当成会话已经删除。
 		FU_RequestNetDriverLeaseRelease(Provider.GetValue(), TEXT("Network failure"));
+	}
+	else if (Provider.GetValue() == EFU_OnlineProvider::Steam)
+	{
+		FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(EFU_OperationKind::Join, FailureOperationId, EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Lease.Retained"), TEXT("四项安全证据不足，保留 GameNetDriver 租约"), FString(), TEXT("Retained"));
+	}
+	else
+	{
+		FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(EFU_OperationKind::Join, FailureOperationId, EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Lease.Retained"), TEXT("四项安全证据不足，保留 GameNetDriver 租约"), FString(), TEXT("Retained"));
 	}
 
 	OnOnlineConnectionFailure.Broadcast(
@@ -2619,7 +2628,7 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 
 	// Travel 的 ErrorString 同样可能带原始 URL；稳定枚举足以让 Blueprint 选择恢复提示。
 	const FString SafeStatus = UEnum::GetValueAsString(FailureType);
-	FU_EmitConnectionFailureDiagnostic(Provider.GetValue(), true, *SafeStatus);
+	const FGuid FailureOperationId = FU_EmitConnectionFailureDiagnostic(Provider.GetValue(), true, *SafeStatus);
 	const FString FailureMessage = FString::Printf(TEXT("地图旅行失败：%s"), *SafeStatus);
 
 	if (FU_CanReleaseNetDriverAfterConnectionFailure(Provider.GetValue()))
@@ -2627,6 +2636,14 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 		// Travel 失败还可能保留 ActiveNetDriver/PendingNetGame/NextURL；全 World 扫描与
 		// Session/操作证据必须同时通过，不能仅依赖延迟 ticker 在未来看到 World 为空。
 		FU_RequestNetDriverLeaseRelease(Provider.GetValue(), TEXT("Travel failure"));
+	}
+	else if (Provider.GetValue() == EFU_OnlineProvider::Steam)
+	{
+		FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(EFU_OperationKind::Join, FailureOperationId, EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Lease.Retained"), TEXT("四项安全证据不足，保留 GameNetDriver 租约"), FString(), TEXT("Retained"));
+	}
+	else
+	{
+		FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(EFU_OperationKind::Join, FailureOperationId, EFU_OnlineDiagnosticPhase::Recovery, EFU_OnlineDiagnosticSeverity::Warning, TEXT("FU.Lease.Retained"), TEXT("四项安全证据不足，保留 GameNetDriver 租约"), FString(), TEXT("Retained"));
 	}
 
 	OnOnlineConnectionFailure.Broadcast(

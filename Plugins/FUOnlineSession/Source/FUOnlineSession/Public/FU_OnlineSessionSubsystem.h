@@ -382,7 +382,7 @@ private:
 	 * 网络/旅行失败通常发生在 OSS 回调已经把状态机置 Idle 之后；状态机仍保留最近的
 	 * ActiveOperationId，因此这里仅只读继承该身份。没有任何关联操作时才创建独立 ID。
 	 */
-	void FU_EmitConnectionFailureDiagnostic(
+	FGuid FU_EmitConnectionFailureDiagnostic(
 		EFU_OnlineProvider Provider,
 		bool bIsTravelFailure,
 		const TCHAR* StableStatus);

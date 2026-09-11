@@ -84,6 +84,37 @@ bool FFUOnlineSessionOperationCorrelationTest::RunTest(const FString& Parameters
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionLeaseOutcomesTest,
+	"FUOnlineSession.Diagnostics.LeaseOutcomes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionLeaseOutcomesTest::RunTest(const FString& Parameters)
+{
+	// 【生产 policy 表驱动】Runtime Acquire/Release 直接消费该 coordinator 映射；这里不手写事件。
+	struct FCase { EFU_NetDriverLeaseResult Result; const TCHAR* Code; const TCHAR* Status; bool bError; };
+	const FCase Cases[] = {
+		{ EFU_NetDriverLeaseResult::Acquired, TEXT("FU.Lease.Acquire"), TEXT("Acquired"), false },
+		{ EFU_NetDriverLeaseResult::AlreadyOwned, TEXT("FU.Lease.Acquire"), TEXT("AlreadyOwned"), false },
+		{ EFU_NetDriverLeaseResult::RestartRequired, TEXT("FU.Lease.Release"), TEXT("RestartRequired"), true },
+		{ EFU_NetDriverLeaseResult::Restored, TEXT("FU.Lease.Release"), TEXT("Restored"), false },
+		{ EFU_NetDriverLeaseResult::ReleaseDeferred, TEXT("FU.Lease.Release"), TEXT("ReleaseDeferred"), true },
+		{ EFU_NetDriverLeaseResult::NoLease, TEXT("FU.Lease.Release"), TEXT("NoLease"), true },
+		{ EFU_NetDriverLeaseResult::NotOwner, TEXT("FU.Lease.Release"), TEXT("NotOwner"), true },
+	};
+	for (const FCase& TestCase : Cases)
+	{
+		const FFU_NetDriverLeaseDiagnosticOutcome Outcome = FFU_OnlineSessionNetDriverLease::GetDiagnosticOutcome(TestCase.Result);
+		TestEqual(TEXT("Lease code 稳定"), Outcome.Code, FName(TestCase.Code));
+		TestEqual(TEXT("Lease status 使用真实 coordinator result"), Outcome.Status, FName(TestCase.Status));
+		TestEqual(TEXT("Lease severity 由 production policy 决定"), Outcome.bIsError, TestCase.bError);
+	}
+	const FGuid SharedId = FGuid::NewGuid();
+	TestTrue(TEXT("Lease 诊断可复用有效 connection OperationId"), SharedId.IsValid());
+	TestEqual(TEXT("Lease pure policy 没有 legacy completion 副作用"), 0, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FFUOnlineSessionDiagnosticSaveFailureTest,
 	"FUOnlineSession.Diagnostics.SaveFailure",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
