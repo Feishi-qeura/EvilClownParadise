@@ -625,16 +625,38 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
 	// 状态检查本身是同步、只读的：它不会登录 Steam、不会修改 ProviderState，
 	// 也不会注册异步委托。因此可以安全地放在每一个公开模板操作的入口处。
 	const FFU_OnlineProviderStatus Status = FU_CheckProviderStatus<Provider>(bRequiresNetDriver);
+	const auto GetDiagnosticOperation = [RootKind]()
+	{
+		switch (RootKind)
+		{
+		case EFU_OperationKind::Create: return EFU_OnlineDiagnosticOperation::CreateSession;
+		case EFU_OperationKind::Find: return EFU_OnlineDiagnosticOperation::FindSessions;
+		case EFU_OperationKind::Join: return EFU_OnlineDiagnosticOperation::JoinSession;
+		case EFU_OperationKind::Destroy: return EFU_OnlineDiagnosticOperation::DestroySession;
+		default: return EFU_OnlineDiagnosticOperation::Recovery;
+		}
+	};
+	const auto EmitProviderPreflight = [&]()
+	{
+		// 【可测生产缝】预检模板与纯自动化测试共用同一事件构造器；这里仍由 Subsystem
+		// 负责补齐 World/PIE 并经唯一的 Emit 出口分发，避免测试手写一份相似事件。
+		FFU_OnlineDiagnosticEvent Event = FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
+			Provider,
+			GetDiagnosticOperation(),
+			OperationId,
+			Status.bIsReady,
+			FUOnlineSession::GetProviderStatusDiagnosticCode(Status.StatusCode),
+			Status.Message);
+		FFU_OnlineDiagnosticField SubsystemField;
+		SubsystemField.Key = FName(TEXT("Subsystem"));
+		SubsystemField.Value = FProviderTraits::GetSubsystemName().ToString();
+		Event.Fields.Add(MoveTemp(SubsystemField));
+		FU_EmitDiagnostic(MoveTemp(Event));
+	};
 	if (Status.bIsReady)
 	{
 		// 预检通过同样需要可观察，Blueprint 可用同一 OperationId 串起 Requested -> Preflight -> Submitted。
-		FU_EmitDiagnostic<Provider>(
-			RootKind,
-			OperationId,
-			EFU_OnlineDiagnosticPhase::Preflight,
-			EFU_OnlineDiagnosticSeverity::Info,
-			FUOnlineSession::GetProviderStatusDiagnosticCode(Status.StatusCode),
-			Status.Message);
+		EmitProviderPreflight();
 		return true;
 	}
 
@@ -670,13 +692,7 @@ bool UFU_OnlineSessionSubsystem::FU_ValidateProviderReady(
 
 	// 【Task 7 时序契约】先把拒绝原因与入口分配的 ID 写入历史/Blueprint，再由调用者广播旧失败委托。
 	// 不能在这里新建 Ticket，否则预销毁续步、Busy 拒绝与后续诊断会断开成不同操作。
-	FU_EmitDiagnostic<Provider>(
-		RootKind,
-		OperationId,
-		EFU_OnlineDiagnosticPhase::Preflight,
-		EFU_OnlineDiagnosticSeverity::Warning,
-		FUOnlineSession::GetProviderStatusDiagnosticCode(Status.StatusCode),
-		Status.Message);
+	EmitProviderPreflight();
 
 	return false;
 }
@@ -1123,8 +1139,6 @@ void UFU_OnlineSessionSubsystem::FU_CreateSession(const int32 MaxPlayers, const 
 
 	// 【FU 修复：Runtime 自我保护】蓝图即使没有先检查状态，
 	// Steam 未登录、子系统缺失或驱动不可用时也不会进入 CreateSession 异步流程。
-	// 旧接线扫描锚点：FU_ValidateProviderReady<Provider>(TEXT("CreateSession"))；实际实现额外传入 Task 6 Ticket，
-	// 才能让预检拒绝使用入口已分配的 OperationId 而非重新生成身份。
 	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("CreateSession")))
 	{
 		OnCreateSessionCompleteV2.Broadcast(Provider, false);
@@ -1359,7 +1373,6 @@ void UFU_OnlineSessionSubsystem::FU_FindSessions(const FString& RoomName,const i
 	// 在这里提前拒绝 NotLoggedIn，可避免随后只得到含义模糊的异步 false 和空 Results。
 	// 搜索不会 Listen 或 ClientTravel，因此不能被另一 Provider 的进程级 NetDriver 租约阻止；
 	// Steam 身份、AppID 与 OSS Session Interface 等搜索环境仍由同一 Evaluator 检查。
-	// 旧接线扫描锚点：FU_ValidateProviderReady<Provider>(TEXT("FindSessions"), false)；Find 仍不要求传输租约。
 	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("FindSessions"), false))
 	{
 		OnFindSessionCompleteV2.Broadcast(Provider, TArray<FFU_SessionResult>{}, false);
@@ -1593,7 +1606,6 @@ void UFU_OnlineSessionSubsystem::FU_JoinSession(const FString& SessionId,const F
 
 	// 【FU 修复：加入前重新验证环境】搜索完成到点击加入之间，Steam 可能掉线，
 	// NetDriver 也可能因地图状态改变而产生冲突；使用同一模板检查可以保留 Provider 类型信息。
-	// 旧接线扫描锚点：FU_ValidateProviderReady<Provider>(TEXT("JoinSession"))；额外 Ticket 参数保证拒绝可关联。
 	if (!FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT("JoinSession")))
 	{
 		OnJoinSessionCompleteV2.Broadcast(Provider, EFU_JoinSessionResult::UnknownError);
@@ -1794,12 +1806,13 @@ void UFU_OnlineSessionSubsystem::FU_OnJoinSessionComplete(
             break;
         }
 
+		// 【安全边界】ResolvedConnectString 可含 Steam ticket、token 或原始旅行 URL；只记录稳定阶段，
+		// 完整地址只作为 ClientTravel 的短生命周期输入，绝不进入任何可观测输出。
 		UE_LOG(
 			LogFUOnlineSession,
 			Display,
-			TEXT("[%s] JoinSession 已解析连接地址，准备 ClientTravel：%s"),
-			TFU_OnlineSessionProviderTraits<Provider>::GetDebugName(),
-			*ConnectString);
+			TEXT("[%s] JoinSession 已解析安全连接地址，准备 ClientTravel"),
+			TFU_OnlineSessionProviderTraits<Provider>::GetDebugName());
 
         APlayerController* PlayerController = FU_GetLocalPlayerController();
 
@@ -2471,6 +2484,46 @@ void UFU_OnlineSessionSubsystem::FU_EmitEnvironmentDiagnostic(
 	FU_EmitDiagnostic(MoveTemp(Event));
 }
 
+void UFU_OnlineSessionSubsystem::FU_EmitConnectionFailureDiagnostic(
+	const EFU_OnlineProvider Provider,
+	const bool bIsTravelFailure,
+	const TCHAR* StableStatus)
+{
+	// 【Task 6 关联继承】不要在网络失败路径重建生命周期表；只读现有 Provider 状态机保留的
+	// ActiveOperationId/ActiveKind。即使回调已结束并转 Idle，该 ID 仍能把随后的 Travel 错误串回 Join。
+	const FFU_OnlineProviderState* State = nullptr;
+	switch (Provider)
+	{
+	case EFU_OnlineProvider::Steam: State = &SteamState; break;
+	case EFU_OnlineProvider::Lan: State = &LanState; break;
+	default: return;
+	}
+	const EFU_OperationKind Kind = State->OperationMachine.IsValid()
+		? State->OperationMachine->Get().RootKind
+		: EFU_OperationKind::Join;
+	const FGuid OperationId = State->OperationMachine.IsValid()
+		&& State->OperationMachine->Get().ActiveOperationId.IsValid()
+		? State->OperationMachine->Get().ActiveOperationId
+		: FGuid::NewGuid();
+	const TCHAR* Code = bIsTravelFailure ? TEXT("FU.TravelFailure") : TEXT("FU.NetworkFailure");
+	const FString Message = bIsTravelFailure
+		? TEXT("引擎报告地图旅行失败；原始 URL 与错误文本已按安全策略省略")
+		: TEXT("引擎报告网络连接失败；原始连接信息与错误文本已按安全策略省略");
+
+	// Provider 运行时只做一次最外层分派；真正构造/分发仍进入 traits 模板边界。
+	switch (Provider)
+	{
+	case EFU_OnlineProvider::Steam:
+		FU_EmitDiagnostic<EFU_OnlineProvider::Steam>(Kind, OperationId, EFU_OnlineDiagnosticPhase::Callback, EFU_OnlineDiagnosticSeverity::Error, Code, Message);
+		break;
+	case EFU_OnlineProvider::Lan:
+		FU_EmitDiagnostic<EFU_OnlineProvider::Lan>(Kind, OperationId, EFU_OnlineDiagnosticPhase::Callback, EFU_OnlineDiagnosticSeverity::Error, Code, Message);
+		break;
+	default:
+		break;
+	}
+}
+
 void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 	UWorld* World,
 	UNetDriver* NetDriver,
@@ -2489,29 +2542,11 @@ void UFU_OnlineSessionSubsystem::FU_OnNetworkFailure(
 		return;
 	}
 
-	const FString FailureMessage = FString::Printf(
-		TEXT("%s: %s (NetDriver=%s)"),
-		ENetworkFailure::ToString(FailureType),
-		*ErrorString,
-		NetDriver ? *NetDriver->GetClass()->GetPathName() : TEXT("None"));
-
-	UE_LOG(LogFUOnlineSession, Error, TEXT("%s"), *FailureMessage);
-
-	FFU_OnlineDiagnosticEvent DiagnosticEvent;
-	DiagnosticEvent.Provider = Provider.GetValue();
-	DiagnosticEvent.Operation = EFU_OnlineDiagnosticOperation::Recovery;
-	DiagnosticEvent.Phase = EFU_OnlineDiagnosticPhase::Callback;
-	DiagnosticEvent.Severity = EFU_OnlineDiagnosticSeverity::Error;
-	DiagnosticEvent.Code = TEXT("FU.NetworkFailure");
-	DiagnosticEvent.Status = ENetworkFailure::ToString(FailureType);
-	DiagnosticEvent.Message = FailureMessage;
-	DiagnosticEvent.Cause = ErrorString;
-	DiagnosticEvent.RecommendedAction = TEXT("检查同一 OperationId 的前置诊断、NetDriver 配置和双方网络日志");
-	FFU_OnlineDiagnosticField NetDriverField;
-	NetDriverField.Key = FName(TEXT("NetDriverClass"));
-	NetDriverField.Value = NetDriver ? NetDriver->GetClass()->GetPathName() : TEXT("None");
-	DiagnosticEvent.Fields.Add(MoveTemp(NetDriverField));
-	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
+	// 【安全边界】引擎 ErrorString 可能包含连接串、Travel URL 或 token，绝不能先直写 UE_LOG。
+	// 只公开稳定 FailureType；详细原文不进入日志、浮层、历史或 Blueprint 任一 sink。
+	const FString SafeStatus = ENetworkFailure::ToString(FailureType);
+	FU_EmitConnectionFailureDiagnostic(Provider.GetValue(), false, *SafeStatus);
+	const FString FailureMessage = FString::Printf(TEXT("网络连接失败：%s"), *SafeStatus);
 
 	if (FU_CanReleaseNetDriverAfterConnectionFailure(Provider.GetValue()))
 	{
@@ -2543,28 +2578,10 @@ void UFU_OnlineSessionSubsystem::FU_OnTravelFailure(
 		return;
 	}
 
-	const FString FailureMessage = FString::Printf(
-		TEXT("%s: %s"),
-		*UEnum::GetValueAsString(FailureType),
-		*ErrorString);
-
-	UE_LOG(LogFUOnlineSession, Error, TEXT("%s"), *FailureMessage);
-
-	FFU_OnlineDiagnosticEvent DiagnosticEvent;
-	DiagnosticEvent.Provider = Provider.GetValue();
-	DiagnosticEvent.Operation = EFU_OnlineDiagnosticOperation::Recovery;
-	DiagnosticEvent.Phase = EFU_OnlineDiagnosticPhase::Callback;
-	DiagnosticEvent.Severity = EFU_OnlineDiagnosticSeverity::Error;
-	DiagnosticEvent.Code = TEXT("FU.TravelFailure");
-	DiagnosticEvent.Status = UEnum::GetValueAsString(FailureType);
-	DiagnosticEvent.Message = FailureMessage;
-	DiagnosticEvent.Cause = ErrorString;
-	DiagnosticEvent.RecommendedAction = TEXT("检查地图路径、NetDriver 前置状态以及同一 OperationId 的联机诊断");
-	FFU_OnlineDiagnosticField FailureTypeField;
-	FailureTypeField.Key = FName(TEXT("TravelFailureType"));
-	FailureTypeField.Value = UEnum::GetValueAsString(FailureType);
-	DiagnosticEvent.Fields.Add(MoveTemp(FailureTypeField));
-	FU_EmitDiagnostic(MoveTemp(DiagnosticEvent));
+	// Travel 的 ErrorString 同样可能带原始 URL；稳定枚举足以让 Blueprint 选择恢复提示。
+	const FString SafeStatus = UEnum::GetValueAsString(FailureType);
+	FU_EmitConnectionFailureDiagnostic(Provider.GetValue(), true, *SafeStatus);
+	const FString FailureMessage = FString::Printf(TEXT("地图旅行失败：%s"), *SafeStatus);
 
 	if (FU_CanReleaseNetDriverAfterConnectionFailure(Provider.GetValue()))
 	{

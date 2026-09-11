@@ -54,9 +54,15 @@ private:
 class FFU_OnlineSessionDiagnostics final
 {
 public:
+	/**
+	 * 报告写入边界；默认实现使用 FFileHelper。仅测试可替换它，以验证写入失败不会递归重试或泄露写入错误原文。
+	 */
+	using FReportWriter = TFunction<bool(const FString& Contents, const FString& Destination)>;
+
 	explicit FFU_OnlineSessionDiagnostics(
 		const FFU_OnlineDiagnosticDispatchConfig& InConfig,
-		TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast);
+		TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast,
+		FReportWriter InReportWriter = FReportWriter());
 
 	/** 统一执行脱敏 -> 有界历史 -> UE_LOG -> Slate 浮层 -> Blueprint 广播。 */
 	FFU_OnlineDiagnosticEvent Emit(const FFU_OnlineDiagnosticEvent& CandidateEvent);
@@ -84,6 +90,18 @@ public:
 	static TOptional<FFU_OnlineDiagnosticEvent> BuildUnsupportedRecoveryProviderDiagnostic(
 		EFU_OnlineProvider Provider);
 
+	/**
+	 * Provider 预检模板与自动化测试共用的纯事件构造缝。它不依赖 UObject/OSS，
+	 * 使“诊断先于旧失败委托”能以真实的稳定状态码和 OperationId 验证。
+	 */
+	static FFU_OnlineDiagnosticEvent BuildProviderPreflightDiagnostic(
+		EFU_OnlineProvider Provider,
+		EFU_OnlineDiagnosticOperation Operation,
+		const FGuid& OperationId,
+		bool bIsReady,
+		const FString& Code,
+		const FString& Message);
+
 	/** Viewport 存在时才创建资产无关的 Slate 浮层；传入 nullptr 等价于解绑。 */
 	void AttachViewport(UGameViewportClient* InViewport);
 	void DetachViewport();
@@ -97,6 +115,7 @@ private:
 	// 分发器只在 GameInstance 游戏线程使用，故无需跨线程原子计数；序号仍能稳定关联同一实例内的事件顺序。
 	int64 NextSequence = 0;
 	TFunction<void(const FFU_OnlineDiagnosticEvent&)> BlueprintBroadcast;
+	FReportWriter ReportWriter;
 	TSharedRef<FFU_OnlineDiagnosticOverlayModel> OverlayModel;
 	TWeakObjectPtr<UGameViewportClient> OverlayViewport;
 	TSharedPtr<SFU_OnlineDiagnosticOverlay> OverlayWidget;

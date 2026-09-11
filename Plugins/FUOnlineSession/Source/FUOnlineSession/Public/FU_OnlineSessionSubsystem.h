@@ -378,6 +378,15 @@ private:
 	TOptional<EFU_OnlineProvider> FU_GetFailureProvider() const;
 
 	/**
+	 * 网络/旅行失败通常发生在 OSS 回调已经把状态机置 Idle 之后；状态机仍保留最近的
+	 * ActiveOperationId，因此这里仅只读继承该身份。没有任何关联操作时才创建独立 ID。
+	 */
+	void FU_EmitConnectionFailureDiagnostic(
+		EFU_OnlineProvider Provider,
+		bool bIsTravelFailure,
+		const TCHAR* StableStatus);
+
+	/**
 	 * Network/TravelFailure 只在接口有效、NamedSession 已消失、无 OSS 回调在途且全 World 安全时释放。
 	 * 该门与普通 Destroy 完成路径分离，避免一次连接错误把仍被正式会话持有的进程租约提前恢复。
 	 */

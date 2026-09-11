@@ -257,15 +257,28 @@ TArray<FFU_OnlineDiagnosticOverlayRow> FFU_OnlineDiagnosticOverlayModel::GetVisi
 
 FFU_OnlineSessionDiagnostics::FFU_OnlineSessionDiagnostics(
 	const FFU_OnlineDiagnosticDispatchConfig& InConfig,
-	TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast)
+	TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast,
+	FReportWriter InReportWriter)
 	: Config(InConfig)
 	, BlueprintBroadcast(MoveTemp(InBlueprintBroadcast))
+	, ReportWriter(MoveTemp(InReportWriter))
 	, OverlayModel(MakeShared<FFU_OnlineDiagnosticOverlayModel>())
 {
 	// 【运行时防御】Subsystem 已消毒配置；这里仍做最小边界保护，让私有测试或未来调用者不会创建无界容器。
 	Config.HistoryLimit = FMath::Clamp(Config.HistoryLimit, 1, 1000);
 	Config.OverlayDurationSeconds = FMath::Clamp(Config.OverlayDurationSeconds, 1.0f, 60.0f);
 	Config.OverlayRowLimit = FMath::Clamp(Config.OverlayRowLimit, 1, 20);
+	if (!ReportWriter)
+	{
+		// 【默认生产写入器】测试可注入失败 writer；运行时仍保持既有受限路径与 UTF-8 报告格式。
+		ReportWriter = [](const FString& Contents, const FString& Destination)
+		{
+			return FFileHelper::SaveStringToFile(
+				Contents,
+				*Destination,
+				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		};
+	}
 }
 
 FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::Emit(const FFU_OnlineDiagnosticEvent& CandidateEvent)
@@ -383,10 +396,7 @@ bool FFU_OnlineSessionDiagnostics::SaveReport(FString& OutSavedPath, FString& Ou
 		TEXT("FUOnlineSession-Diagnostics-%s.txt"),
 		*FDateTime::UtcNow().ToString(TEXT("yyyyMMdd-HHmmss-fff")));
 	const FString SavedPath = FPaths::Combine(ReportDirectory, Filename);
-	if (!FFileHelper::SaveStringToFile(
-		BuildReport(),
-		*SavedPath,
-		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	if (!ReportWriter(BuildReport(), SavedPath))
 	{
 		OutError = TEXT("无法写入 FUOnlineSession 诊断报告");
 		FFU_OnlineDiagnosticEvent FailureEvent;
@@ -464,6 +474,29 @@ TOptional<FFU_OnlineDiagnosticEvent> FFU_OnlineSessionDiagnostics::BuildUnsuppor
 	Event.Status = TEXT("Rejected");
 	Event.Message = TEXT("TryRecoverProvider 收到不支持的 Provider，未读取或修改任何 Provider 状态");
 	Event.RecommendedAction = TEXT("检查 Blueprint 枚举接线或版本兼容性后重试");
+	return Event;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
+	const EFU_OnlineProvider Provider,
+	const EFU_OnlineDiagnosticOperation Operation,
+	const FGuid& OperationId,
+	const bool bIsReady,
+	const FString& Code,
+	const FString& Message)
+{
+	FFU_OnlineDiagnosticEvent Event;
+	Event.OperationId = OperationId;
+	Event.Provider = Provider;
+	Event.Operation = Operation;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Preflight;
+	Event.Severity = bIsReady ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning;
+	Event.Code = Code;
+	Event.Status = bIsReady ? TEXT("Ready") : TEXT("Rejected");
+	Event.Message = Message;
+	Event.RecommendedAction = bIsReady
+		? TEXT("环境已就绪；可继续调用对应的 Create、Find、Join 或 Destroy 蓝图入口")
+		: TEXT("根据 StatusCode 修复环境后重新运行 RunProviderDiagnostics");
 	return Event;
 }
 

@@ -4,6 +4,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Internationalization/Regex.h"
 #include "PluginDescriptor.h"
 #include "UObject/UnrealType.h"
 #include "FUOnlineSessionConfigManager.h"
@@ -30,20 +31,42 @@ bool FFUOnlineSessionProviderOperationPreflightWiringTest::RunTest(const FString
 	TestTrue(
 		TEXT("能够读取 FU Online Session Runtime 实现"),
 		FFileHelper::LoadFileToString(RuntimeSource, *RuntimeSourcePath));
+	// 【抗注释伪绿】先剥离单行与块注释，再验证真实可执行调用；未来任何人仅在注释中补文本
+	// 都不能满足该契约。Task 7 必须把入口 Ticket 传入 gate，才能保留同一 OperationId。
+	while (true)
+	{
+		FRegexMatcher BlockCommentMatcher(FRegexPattern(TEXT("/\\*[\\s\\S]*?\\*/")), RuntimeSource);
+		if (!BlockCommentMatcher.FindNext())
+		{
+			break;
+		}
+		RuntimeSource = RuntimeSource.Left(BlockCommentMatcher.GetMatchBeginning())
+			+ RuntimeSource.Mid(BlockCommentMatcher.GetMatchEnding());
+	}
+	while (true)
+	{
+		FRegexMatcher LineCommentMatcher(FRegexPattern(TEXT("//[^\\r\\n]*")), RuntimeSource);
+		if (!LineCommentMatcher.FindNext())
+		{
+			break;
+		}
+		RuntimeSource = RuntimeSource.Left(LineCommentMatcher.GetMatchBeginning())
+			+ RuntimeSource.Mid(LineCommentMatcher.GetMatchEnding());
+	}
 
 	TestTrue(
 		TEXT("创建模板入口必须检查 Provider 是否 Ready"),
-		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(TEXT(\"CreateSession\"))")));
+		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"CreateSession\"))")));
 
 	TestTrue(
 		TEXT("搜索模板入口必须检查 Provider 是否 Ready，但不得占用传输 NetDriver 租约"),
 		// 【FU 回归测试：搜索与传输解耦】FindSessions 仍需验证 OSS、身份与 AppID，
 		// 但它不会 Listen/ClientTravel，所以必须显式传入 false，避免另一 Provider 的活动连接阻止搜索。
-		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(TEXT(\"FindSessions\"), false)")));
+		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"FindSessions\"), false)")));
 
 	TestTrue(
 		TEXT("加入模板入口必须检查 Provider 是否 Ready"),
-		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(TEXT(\"JoinSession\"))")));
+		RuntimeSource.Contains(TEXT("FU_ValidateProviderReady<Provider>(RootTicket.Kind, RootTicket.OperationId, TEXT(\"JoinSession\"))")));
 
 	return true;
 }

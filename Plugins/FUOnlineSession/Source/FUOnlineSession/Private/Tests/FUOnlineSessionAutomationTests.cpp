@@ -45,19 +45,18 @@ bool FFUOnlineSessionOperationCorrelationTest::RunTest(const FString& Parameters
 		FFU_OnlineProviderStatusEvaluator::Evaluate(EFU_OnlineProvider::Steam, Inputs);
 	TestEqual(TEXT("测试缝确实得到 Steam 子系统不可用"), StatusCode, EFU_OnlineProviderStatusCode::SubsystemUnavailable);
 
-	// 【Task 7 GREEN 测试缝】真实模板预检使用相同的 Provider、根操作和 Ticket ID 构造事件；
-	// 先 Emit 再模拟既有完成委托，锁住 Blueprint 能在旧结果之前读取明确原因的时序。
+	// 【生产缝回归】FU_ValidateProviderReady 使用同一个纯构造器；先 Emit 再模拟既有完成委托，
+	// 锁住 Blueprint 能在旧结果之前读取明确原因的时序，且测试不再手写一份预检事件字段。
 	if (StatusCode != EFU_OnlineProviderStatusCode::Ready)
 	{
-		FFU_OnlineDiagnosticEvent PreflightEvent;
-		PreflightEvent.OperationId = Ticket.OperationId;
-		PreflightEvent.Provider = EFU_OnlineProvider::Steam;
-		PreflightEvent.Operation = EFU_OnlineDiagnosticOperation::CreateSession;
-		PreflightEvent.Phase = EFU_OnlineDiagnosticPhase::Preflight;
-		PreflightEvent.Severity = EFU_OnlineDiagnosticSeverity::Warning;
-		PreflightEvent.Code = TEXT("FU.Provider.SubsystemUnavailable");
-		PreflightEvent.Status = TEXT("Rejected");
-		PreflightEvent.Message = TEXT("Steam OnlineSubsystem 不可用");
+		const FFU_OnlineDiagnosticEvent PreflightEvent =
+			FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
+				EFU_OnlineProvider::Steam,
+				EFU_OnlineDiagnosticOperation::CreateSession,
+				Ticket.OperationId,
+				false,
+				TEXT("FU.Provider.SubsystemUnavailable"),
+				TEXT("Steam OnlineSubsystem 不可用"));
 		Diagnostics.Emit(PreflightEvent);
 		++LegacyFailureBroadcastCount;
 	}
@@ -72,6 +71,48 @@ bool FFUOnlineSessionOperationCorrelationTest::RunTest(const FString& Parameters
 		TestEqual(TEXT("预检事件关联 Steam"), History[0].Provider, EFU_OnlineProvider::Steam);
 		TestEqual(TEXT("预检事件使用稳定子系统不可用代码"), History[0].Code, FString(TEXT("FU.Provider.SubsystemUnavailable")));
 		TestTrue(TEXT("预检事件带有非零 OperationId"), History[0].OperationId.IsValid() && History[0].OperationId == Ticket.OperationId);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionDiagnosticSaveFailureTest,
+	"FUOnlineSession.Diagnostics.SaveFailure",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionDiagnosticSaveFailureTest::RunTest(const FString& Parameters)
+{
+	// 【失败注入】写入器只允许被调用一次；SaveReport 的失败事件只能走 Emit，不能重新尝试写报告。
+	FFU_OnlineDiagnosticDispatchConfig Config;
+	Config.bEmitToLog = false;
+	Config.bEnableOverlay = false;
+	int32 WriteAttempts = 0;
+	int32 BlueprintEventCount = 0;
+	FFU_OnlineSessionDiagnostics Diagnostics(
+		Config,
+		[&BlueprintEventCount](const FFU_OnlineDiagnosticEvent&)
+		{
+			++BlueprintEventCount;
+		},
+		[&WriteAttempts](const FString&, const FString&)
+		{
+			++WriteAttempts;
+			return false;
+		});
+
+	FString SavedPath;
+	FString SaveError;
+	TestFalse(TEXT("注入写入失败时 SaveReport 返回失败"), Diagnostics.SaveReport(SavedPath, SaveError));
+	TestEqual(TEXT("写入失败不会递归重试"), WriteAttempts, 1);
+	TestTrue(TEXT("失败不返回伪造保存路径"), SavedPath.IsEmpty());
+	TestFalse(TEXT("失败文本不回显注入写入器输入"), SaveError.Contains(TEXT("token="), ESearchCase::IgnoreCase));
+	const TArray<FFU_OnlineDiagnosticEvent> History = Diagnostics.GetHistory();
+	TestEqual(TEXT("写入失败至多产生一条诊断事件"), History.Num(), 1);
+	TestEqual(TEXT("失败事件只通过一次 Blueprint 出口"), BlueprintEventCount, 1);
+	if (History.Num() == 1)
+	{
+		TestEqual(TEXT("写入失败使用稳定安全错误码"), History[0].Code, FString(TEXT("FU.Diagnostics.ReportSaveFailed")));
+		TestTrue(TEXT("写入失败事件不携带字段"), History[0].Fields.IsEmpty());
 	}
 	return true;
 }
