@@ -5,6 +5,7 @@
 #include "Engine/GameInstance.h"
 #include "Engine/NetDriver.h"
 #include "Engine/PendingNetGame.h"
+#include "Engine/World.h"
 
 namespace FUOnlineSessionNetDriverLeasePrivate
 {
@@ -131,7 +132,11 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 		for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
 		{
 			// PendingNetGame 即使 NetDriver 仍为空，也可能在下一帧按 GameNetDriver 创建连接；不能抢先恢复。
-			if (WorldContext.PendingNetGame != nullptr || !WorldContext.TravelURL.IsEmpty())
+			const UWorld* const World = WorldContext.World();
+			if (WorldContext.PendingNetGame != nullptr
+				|| !WorldContext.TravelURL.IsEmpty()
+				|| (World != nullptr && !World->NextURL.IsEmpty())
+				|| WorldContext.SeamlessTravelHandler.IsInTransition())
 			{
 				return false;
 			}
@@ -139,7 +144,7 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 			for (const FNamedNetDriver& NamedDriver : WorldContext.ActiveNetDrivers)
 			{
 				const UNetDriver* const NetDriver = NamedDriver.NetDriver;
-				if (NamedDriver.NetDriverDef == TargetDefinition
+				if ((TargetDefinition != nullptr && NamedDriver.NetDriverDef == TargetDefinition)
 					|| (NetDriver != nullptr && NetDriver->GetNetDriverDefinition() == NAME_GameNetDriver))
 				{
 					return false;
@@ -183,7 +188,10 @@ namespace FUOnlineSessionNetDriverLeasePrivate
 			}
 			// ClientTravel/ServerTravel 可能已写入 TravelURL，但 PendingNetGame 要到下一帧才出现；
 			// 该间隙同样会按 GameNetDriver 创建连接，首租和恢复都必须保守阻止。
-			if (!WorldContext.TravelURL.IsEmpty())
+			const UWorld* const World = WorldContext.World();
+			if (!WorldContext.TravelURL.IsEmpty()
+				|| (World != nullptr && !World->NextURL.IsEmpty())
+				|| WorldContext.SeamlessTravelHandler.IsInTransition())
 			{
 				Result.bHasPendingTravel = true;
 			}
@@ -389,6 +397,17 @@ EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::EvaluateRestore(
 	return EFU_NetDriverLeaseResult::Restored;
 }
 
+bool FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(
+	const FFU_NetDriverLeaseReleaseSnapshot& Snapshot)
+{
+	// 显式恢复是最后一道安全门：错误线程或进程已 poison 时没有足够证据读取/信任全局状态；
+	// 任意租约仍存在也必须失败，即使它看似属于另一 owner/provider，避免与刚开始的请求交错复位 Provider。
+	return Snapshot.bIsGameThread
+		&& Snapshot.bOwnerValid
+		&& !Snapshot.bProcessLeasePoisoned
+		&& !Snapshot.bLeaseExists;
+}
+
 EFU_NetDriverLeaseResult FFU_OnlineSessionNetDriverLease::ProbeAcquire(
 	UGameInstance* Owner,
 	const EFU_OnlineProvider Provider,
@@ -581,6 +600,45 @@ void FFU_OnlineSessionNetDriverLease::TickDeferredRelease()
 	{
 		UE_LOG(LogFUOnlineSession, Display, TEXT("GameNetDriver 延迟恢复结果：%s"), ToText(Result));
 	}
+}
+
+bool FFU_OnlineSessionNetDriverLease::IsReleaseComplete(
+	UGameInstance* Owner,
+	const EFU_OnlineProvider Provider)
+{
+	using namespace FUOnlineSessionNetDriverLeasePrivate;
+
+	FFU_NetDriverLeaseReleaseSnapshot Snapshot;
+	Snapshot.bIsGameThread = IsInGameThread();
+	if (!Snapshot.bIsGameThread)
+	{
+		return false;
+	}
+	Snapshot.bOwnerValid = IsValid(Owner);
+	if (!Snapshot.bOwnerValid)
+	{
+		return false;
+	}
+
+	Snapshot.bProcessLeasePoisoned = bProcessLeasePoisoned;
+	Snapshot.bLeaseExists = GLease.IsSet();
+	if (GLease.IsSet())
+	{
+		// 精确匹配信息仅用于保守判定与测试可见语义；EvaluateReleaseComplete 不会把“不匹配”
+		// 当成释放完成，因为该现存租约可能已经开始新的旅行或属于另一 PIE 实例。
+		Snapshot.bSameOwner = Owner != nullptr && GLease->Owner.Get() == Owner;
+		Snapshot.bSameProvider = GLease->Provider == Provider;
+	}
+
+	return EvaluateReleaseComplete(Snapshot);
+}
+
+bool FFU_OnlineSessionNetDriverLease::AreAllWorldsClearForRecovery()
+{
+	using namespace FUOnlineSessionNetDriverLeasePrivate;
+	// 与租约恢复复用同一份全进程扫描，避免 TryRecoverProvider 只看当前 PIE World 而与 ticker 规则漂移。
+	// poisoned 状态不影响“是否有驱动”的只读事实，但错误线程不能遍历 UObject/WorldContext。
+	return IsInGameThread() && AreAllWorldsClear(nullptr);
 }
 
 void FFU_OnlineSessionNetDriverLease::ShutdownModule()

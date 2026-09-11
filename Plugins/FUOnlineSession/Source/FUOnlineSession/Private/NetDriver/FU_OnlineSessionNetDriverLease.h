@@ -77,6 +77,19 @@ struct FFU_NetDriverLeasePreflight
 };
 
 /**
+ * 释放完成查询的纯快照。该查询与 ProbeAcquire 完全分离：能再次获取不等于原租约已经安全恢复。
+ */
+struct FFU_NetDriverLeaseReleaseSnapshot
+{
+	bool bIsGameThread = false;
+	bool bOwnerValid = false;
+	bool bProcessLeasePoisoned = false;
+	bool bLeaseExists = false;
+	bool bSameOwner = false;
+	bool bSameProvider = false;
+};
+
+/**
  * 进程级 GameNetDriver 租约。
  *
  * Provider traits 仍是 Steam/LAN 类名的唯一来源；本类只负责把已选择的类名安全地临时安装到
@@ -98,6 +111,7 @@ public:
 		const FFU_NetDriverLeaseFingerprint& Expected,
 		const FFU_NetDriverLeaseFingerprint& Current,
 		bool bAllWorldsClear);
+	static bool EvaluateReleaseComplete(const FFU_NetDriverLeaseReleaseSnapshot& Snapshot);
 
 	/** 只读取当前进程状态；用于 ProviderStatus 在不改写 GEngine 的前提下预报租约冲突。 */
 	static EFU_NetDriverLeaseResult ProbeAcquire(
@@ -123,6 +137,15 @@ public:
 		EFU_OnlineProvider Provider,
 		const TCHAR* Reason);
 	static void TickDeferredRelease();
+
+	/**
+	 * 只读确认进程级租约已经完全不存在；错误线程、poisoned 状态或任意现存租约都保守返回 false。
+	 * Owner+Provider 作为调用身份参与快照，绝不调用 Acquire、Restore、Cancel 或改写 GEngine。
+	 */
+	static bool IsReleaseComplete(UGameInstance* Owner, EFU_OnlineProvider Provider);
+
+	/** 只读扫描全部 WorldContext；任一活动 GameNetDriver、PendingNetGame 或已排队 Travel 都返回 false。 */
+	static bool AreAllWorldsClearForRecovery();
 
 	/** Runtime 模块卸载时撤销 ticker，并且只在完整安全指纹仍成立时进行最后一次恢复。 */
 	static void ShutdownModule();

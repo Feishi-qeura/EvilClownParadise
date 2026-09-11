@@ -7,6 +7,7 @@
 #include "Engine/EngineBaseTypes.h"
 #include "Net/Core/Connection/NetEnums.h"
 #include "Templates/UniquePtr.h"
+#include "TimerManager.h"
 #include "FU_OnlineDiagnosticTypes.h"
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineSessionSubsystem.generated.h"
@@ -14,6 +15,9 @@
 // 【自包含声明】该头只通过指针接收 NetDriver；明确前置声明避免严格编译依赖 PCH 间接包含。
 class UNetDriver;
 class FFU_OnlineSessionDiagnostics;
+class FFU_OnlineOperationStateMachine;
+struct FFU_OperationTicket;
+enum class EFU_OperationKind : uint8;
 
 /**
  * 诊断分发器是 Private 实现；自定义删除器避免把私有 Slate/文件实现暴露到 Public 头，
@@ -22,6 +26,12 @@ class FFU_OnlineSessionDiagnostics;
 struct FFU_OnlineSessionDiagnosticsDeleter
 {
 	void operator()(FFU_OnlineSessionDiagnostics* Diagnostics) const;
+};
+
+/** Private 操作状态机的删除也固定在 Runtime cpp，Public 头不泄露其实现。 */
+struct FFU_OnlineOperationStateMachineDeleter
+{
+	void operator()(FFU_OnlineOperationStateMachine* StateMachine) const;
 };
 
 
@@ -71,7 +81,7 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category="FUOnlineSession|Diagnostics")
 	bool SaveDiagnosticReport(FString& OutSavedPath, FString& OutError);
-	
+
 	//Steam蓝图入口:负责选择Provider，实现由template去做
 	/* Steam创建房间
 	 * 1.负责创建房间，是谁？ Steam的会话，在线子系统会走Steam Lobby
@@ -109,6 +119,13 @@ public:
 	//销毁房间
 	UFUNCTION(BlueprintCallable, Category="FUOnlineSession|Online Session|LAN")
 	void DestroyLanSession();
+
+	/**
+	 * 保守尝试收敛指定 Provider；只有原始 OSS 回调终止、无 Session、全 World 无驱动且租约已释放才返回 true。
+	 * 本函数不会强制取消不可取消的 OSS 操作，也不会越过进程级租约所有权规则。新 API 追加在旧蓝图入口之后。
+	 */
+	UFUNCTION(BlueprintCallable, Category="FU Online Session|Diagnostics")
+	bool TryRecoverProvider(EFU_OnlineProvider Provider);
 	
 	
 	
@@ -151,23 +168,6 @@ private:
 		//加入
 		Join
 	};
-	
-	//初始Idle -> 创建Creating -> 查找Finding -> 加入Joining -> 完成和失败Idle
-	//状态，同一时间只执行一个Session异步操作，避免多个布尔值形成矛盾状态
-	enum class EFU_ProviderOperationState : uint8
-	{
-		//等待
-		Idle,
-		//创建
-		Creating,
-		//查找
-		Finding,
-		//加入
-		Joining,
-		//移除
-		Destroying
-	};
-	
 	
 	/*
 	 *FFU_OnlineProviderState结构体 在线提供异步运行的方法，lobby和NULL格子保留一个实例
@@ -221,14 +221,20 @@ private:
 		//当前正在销毁旧Session。销毁成功后应该继续做什么
 		EFU_PendingOperation PendingOperation = EFU_PendingOperation::None;
 
-		//记录当前异步操作；完成或同步启动失败后必须恢复为 Idle。
-		EFU_ProviderOperationState OperationState = EFU_ProviderOperationState::Idle;
-		
 		//委托Handle清除
 		FDelegateHandle CreateDelegateHandle;
 		FDelegateHandle FindDelegateHandle;
 		FDelegateHandle JoinDelegateHandle;
 		FDelegateHandle DestroyDelegateHandle;
+
+		// Find 取消拥有独立 OSS 完成委托；失败取消只清本 Handle，原 Find delegate 继续等待。
+		FDelegateHandle CancelFindDelegateHandle;
+
+		// 每次提交都使用 generation 捕获的一次性 watchdog；Busy/预检拒绝不得触碰该 Handle。
+		FTimerHandle OperationWatchdogHandle;
+
+		// 状态机是操作生命周期唯一事实源；旧 OperationState 已删除，避免双份状态漂移。
+		TUniquePtr<FFU_OnlineOperationStateMachine, FFU_OnlineOperationStateMachineDeleter> OperationMachine;
 	};
 
 	//Steam与NULL的接口、搜索结果和委托必须独立保存，不能复用旧的单状态字段，2个实例对象
@@ -284,7 +290,7 @@ private:
 	void FU_CreateSession(int32 MaxPlayers, const FString& RoomName, const FString& RoomPassword);
 	
 	template<EFU_OnlineProvider Provider>
-	void FU_CreateSessionInternal();
+	void FU_CreateSessionInternal(FFU_OperationTicket* RootTicket = nullptr);
 	
 	template<EFU_OnlineProvider Provider>
     void FU_FindSessions(const FString& RoomName, int32 MaxResults);
@@ -293,31 +299,37 @@ private:
 	void FU_JoinSession(const FString& SessionId, const FString& RoomPasswordInput); 
 
 	template<EFU_OnlineProvider Provider>
-	void FU_JoinSessionInternal();
+	void FU_JoinSessionInternal(FFU_OperationTicket* RootTicket = nullptr);
 	
 	template<EFU_OnlineProvider Provider>
-    void FU_DestroySession(EFU_PendingOperation InPendingOperation = EFU_PendingOperation::None);
+    void FU_DestroySession(EFU_PendingOperation InPendingOperation = EFU_PendingOperation::None, FFU_OperationTicket* RootTicket = nullptr);
 
 	template<EFU_OnlineProvider Provider>
-	bool FU_DestroyExistingSessionForPendingOperation(EFU_PendingOperation InPendingOperation);
+	bool FU_DestroyExistingSessionForPendingOperation(EFU_PendingOperation InPendingOperation, FFU_OperationTicket& RootTicket);
 	
 	//回调模板
 	//SessionName:本地命名会话名称为NAME_GameSession
 	//bWasSuccessful是否成功
 	template<EFU_OnlineProvider Provider>
-	void FU_OnCreateSessionComplete(FName SessionName, bool bWasSuccessful);
+	void FU_OnCreateSessionComplete(FName SessionName, bool bWasSuccessful, uint64 Generation);
 
 	//保存State.SessionSearch->SearchResults
 	//bWasSuccessful为true，SearchResults为空则表示查找正常，房间没有被找到
 	template<EFU_OnlineProvider Provider>
-	void FU_OnFindSessionsComplete(bool bWasSuccessful);
+	void FU_OnFindSessionsComplete(bool bWasSuccessful, uint64 Generation);
 
 	//NAME_GameSession。Result：输出对应的结果
 	template<EFU_OnlineProvider Provider>
-	void FU_OnJoinSessionComplete(FName SessionName, EOnJoinSessionCompleteResult::Type Result);
+	void FU_OnJoinSessionComplete(FName SessionName, EOnJoinSessionCompleteResult::Type Result, uint64 Generation);
 
 	template<EFU_OnlineProvider Provider>
-	void FU_OnDestroySessionComplete(FName SessionName, bool bWasSuccessful);
+	void FU_OnDestroySessionComplete(FName SessionName, bool bWasSuccessful, uint64 Generation);
+
+	template<EFU_OnlineProvider Provider>
+	void FU_OnFindCancellationComplete(bool bWasSuccessful, uint64 Generation);
+
+	template<EFU_OnlineProvider Provider>
+	void FU_OnOperationTimeout(uint64 Generation);
 	
 	//清理函数
 	/*
@@ -359,6 +371,46 @@ private:
 	 * 协调器会在任一 World 仍有驱动或 PendingNetGame 时延迟恢复，因此调用方不需要冒险强改 GEngine。
 	 */
 	void FU_RequestNetDriverLeaseRelease(EFU_OnlineProvider Provider, const TCHAR* Reason);
+
+	/** 以下 helper 只在 generation/kind/phase 验证通过后操作精确资源，保证迟到回调不能清新请求。 */
+	template<EFU_OnlineProvider Provider>
+	FFU_OnlineOperationStateMachine& FU_GetOperationMachine();
+
+	template<EFU_OnlineProvider Provider>
+	FFU_OperationTicket FU_BeginOperationAttempt(EFU_OperationKind RootKind);
+
+	template<EFU_OnlineProvider Provider>
+	bool FU_SubmitOperation(FFU_OperationTicket& Ticket, EFU_OperationKind SubmittedKind, uint64& OutGeneration);
+
+	template<EFU_OnlineProvider Provider>
+	void FU_ArmOperationWatchdog(uint64 Generation);
+
+	template<EFU_OnlineProvider Provider>
+	void FU_ClearOperationWatchdog();
+
+	template<EFU_OnlineProvider Provider>
+	void FU_ClearOperationDelegate(EFU_OperationKind SubmittedKind);
+
+	template<EFU_OnlineProvider Provider>
+	void FU_ClearFindCancellationDelegate();
+
+	template<EFU_OnlineProvider Provider>
+	void FU_BroadcastOperationFailure(EFU_OperationKind RootKind);
+
+	template<EFU_OnlineProvider Provider>
+	bool FU_StartRecoveryDestroy(bool bExplicitRetry);
+
+	template<EFU_OnlineProvider Provider>
+	bool FU_TryRecoverProvider();
+
+	void FU_EmitOperationDiagnostic(
+		EFU_OnlineProvider Provider,
+		EFU_OperationKind Kind,
+		const FGuid& OperationId,
+		EFU_OnlineDiagnosticPhase Phase,
+		EFU_OnlineDiagnosticSeverity Severity,
+		const TCHAR* Code,
+		const FString& Message);
 
 	/** 为系统级失败补齐 World/PIE 上下文后进入统一诊断分发器。 */
 	void FU_EmitDiagnostic(FFU_OnlineDiagnosticEvent Event);

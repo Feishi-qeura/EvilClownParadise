@@ -7,11 +7,113 @@
 #include "FU_OnlineDiagnosticTypes.h"
 #include "Diagnostics/FU_OnlineSessionDiagnostics.h"
 #include "FU_OnlineSessionRequestValidation.h"
+#include "FU_OnlineOperationStateMachine.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
 #include "FU_SteamAppIdBootstrap.h"
 #include "NetDriver/FU_OnlineSessionNetDriverLease.h"
 #include "FU_CheckSessionStatusAsync.h"
 #include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FFUOnlineSessionOperationStateMachineTest,
+	"FUOnlineSession.OperationStateMachine",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFUOnlineSessionOperationStateMachineTest::RunTest(const FString& Parameters)
+{
+	// 【回归：Busy 不能使在途回调失效】第二次公开调用必须取得自己的尝试序号和诊断 ID，
+	// 但不能覆盖第一条已提交请求的 generation、根操作、当前 OSS 操作或完成标记。
+	FFU_OnlineOperationStateMachine BusyMachine;
+	FFU_OperationTicket First = BusyMachine.BeginAttempt(EFU_OperationKind::Create);
+	TestTrue(TEXT("首次 Create 可以在 preflight 后被接收"), BusyMachine.AcceptAttempt(First, EFU_OperationKind::Create));
+	const FFU_OperationState ActiveBeforeBusy = BusyMachine.Get();
+	const FFU_OperationTicket Rejected = BusyMachine.RecordRejectedAttempt(EFU_OperationKind::Join);
+	TestFalse(TEXT("Busy 尝试没有被接收"), Rejected.bAccepted);
+	TestTrue(TEXT("Busy 尝试仍分配严格递增的尝试序号"), Rejected.AttemptSequence > First.AttemptSequence);
+	TestTrue(TEXT("Busy 尝试仍分配独立诊断 ID"), Rejected.OperationId.IsValid() && Rejected.OperationId != First.OperationId);
+	TestEqual(TEXT("Busy reject preserves active generation"), BusyMachine.Get().ActiveGeneration, First.Generation);
+	TestEqual(TEXT("Busy reject preserves active operation id"), BusyMachine.Get().ActiveOperationId, ActiveBeforeBusy.ActiveOperationId);
+	TestEqual(TEXT("Busy reject preserves root kind"), BusyMachine.Get().RootKind, EFU_OperationKind::Create);
+	TestEqual(TEXT("Busy reject preserves submitted kind"), BusyMachine.Get().ActiveKind, EFU_OperationKind::Create);
+	TestEqual(TEXT("Busy reject preserves phase"), BusyMachine.Get().Phase, EFU_OperationPhase::Submitted);
+	TestEqual(TEXT("Busy reject preserves completion flag"), BusyMachine.Get().bCompletionBroadcast, ActiveBeforeBusy.bCompletionBroadcast);
+
+	// 【回归：NoSession 不是 Create 已终止的证据】超时只广播一次失败并保留原始 delegate；
+	// 在原回调真正到达前，即使 GetNamedSession 暂时为空也不能回到 Idle。
+	const EFU_OperationAction CreateTimeout = BusyMachine.HandleTimeout(First.Generation);
+	TestTrue(TEXT("Create 超时请求一次失败广播"), EnumHasAnyFlags(CreateTimeout, EFU_OperationAction::BroadcastFailure));
+	TestTrue(TEXT("Create 超时保留原始回调"), EnumHasAnyFlags(CreateTimeout, EFU_OperationAction::KeepOriginalDelegate));
+	TestTrue(TEXT("Create 超时只清已触发 watchdog"), EnumHasAnyFlags(CreateTimeout, EFU_OperationAction::ClearWatchdog));
+	TestFalse(TEXT("Create 超时不清原始 delegate"), EnumHasAnyFlags(CreateTimeout, EFU_OperationAction::ClearOriginalDelegate));
+	TestFalse(TEXT("NoSession cannot end original Create"), BusyMachine.CanFinishRecovery(false, true));
+	TestEqual(TEXT("Create 超时进入恢复态"), BusyMachine.Get().Phase, EFU_OperationPhase::Recovering);
+	TestTrue(TEXT("Create 超时等待原回调"), BusyMachine.Get().bAwaitingOriginalCompletion);
+
+	// 迟到成功不得再让上层旅行，而应只启动一次补偿 Destroy；重复回调必须成为 no-op。
+	const EFU_OperationAction LateCreateSuccess = BusyMachine.HandleOriginalCompletion(First.Generation, true, true);
+	TestTrue(TEXT("迟到 Create 成功启动补偿 Destroy"), EnumHasAnyFlags(LateCreateSuccess, EFU_OperationAction::StartRecoveryDestroy));
+	TestFalse(TEXT("迟到 Create 成功不重复广播"), EnumHasAnyFlags(LateCreateSuccess, EFU_OperationAction::BroadcastFailure));
+	TestEqual(TEXT("补偿 Destroy 只计一次"), BusyMachine.Get().RecoveryDestroyAttempts, static_cast<uint8>(1));
+	TestEqual(TEXT("重复迟到回调被 generation gate 丢弃"), BusyMachine.HandleOriginalCompletion(First.Generation, true, true), EFU_OperationAction::None);
+
+	// 【链式操作】公开 Create 的根身份在预销毁期间保持 Create，但当前 OSS kind 必须是 Destroy；
+	// Destroy 正常完成后续步 Create 使用同一 OperationId、一个新 generation。
+	FFU_OnlineOperationStateMachine ChainedMachine;
+	FFU_OperationTicket ChainedCreate = ChainedMachine.BeginAttempt(EFU_OperationKind::Create);
+	TestTrue(TEXT("预销毁提交被接收"), ChainedMachine.AcceptAttempt(ChainedCreate, EFU_OperationKind::Destroy));
+	TestEqual(TEXT("预销毁保留根 Create"), ChainedMachine.Get().RootKind, EFU_OperationKind::Create);
+	TestEqual(TEXT("预销毁记录当前 Destroy"), ChainedMachine.Get().ActiveKind, EFU_OperationKind::Destroy);
+	const uint64 DestroyGeneration = ChainedCreate.Generation;
+	const EFU_OperationAction PreDestroyComplete = ChainedMachine.HandleOriginalCompletion(
+		DestroyGeneration,
+		EFU_OperationKind::Destroy,
+		true,
+		false);
+	TestTrue(TEXT("预销毁正常回调清 watchdog"), EnumHasAnyFlags(PreDestroyComplete, EFU_OperationAction::ClearWatchdog));
+	TestTrue(TEXT("预销毁正常回调清当前 Destroy delegate"), EnumHasAnyFlags(PreDestroyComplete, EFU_OperationAction::ClearOriginalDelegate));
+	TestTrue(TEXT("同一根尝试可以续步 Create"), ChainedMachine.ContinueAcceptedAttempt(EFU_OperationKind::Create));
+	TestEqual(TEXT("续步保持 OperationId"), ChainedMachine.Get().ActiveOperationId, ChainedCreate.OperationId);
+	TestTrue(TEXT("续步分配新 generation"), ChainedMachine.Get().ActiveGeneration > DestroyGeneration);
+	TestEqual(TEXT("续步当前 kind 更新为 Create"), ChainedMachine.Get().ActiveKind, EFU_OperationKind::Create);
+
+	// Find 超时只启动可取消协议且从不请求传输租约释放；取消前仍保留原 Find delegate。
+	FFU_OnlineOperationStateMachine FindMachine;
+	FFU_OperationTicket Find = FindMachine.BeginAcceptedAttempt(EFU_OperationKind::Find);
+	const EFU_OperationAction FindTimeout = FindMachine.HandleTimeout(Find.Generation);
+	TestTrue(TEXT("Find 超时启动取消"), EnumHasAnyFlags(FindTimeout, EFU_OperationAction::StartFindCancellation));
+	TestTrue(TEXT("Find 超时保留原 Find 回调"), EnumHasAnyFlags(FindTimeout, EFU_OperationAction::KeepOriginalDelegate));
+	TestFalse(TEXT("Find 超时不占用也不释放 NetDriver lease"), EnumHasAnyFlags(FindTimeout, EFU_OperationAction::RequestLeaseRelease));
+
+	// 同 generation 的错误 delegate kind 也必须被拒绝，防止链式 Destroy 的迟到回调清掉后续 Join。
+	TestFalse(TEXT("错误 submitted kind 不是当前回调"), FindMachine.IsExpectedCallback(Find.Generation, EFU_OperationKind::Join));
+	TestEqual(
+		TEXT("错误 submitted kind 不改变状态"),
+		FindMachine.HandleOriginalCompletion(Find.Generation, EFU_OperationKind::Join, false, false),
+		EFU_OperationAction::None);
+
+	// OSS Join 报 Success 后，地址解析或 PlayerController 仍可能失败；NamedSession 已存在时必须先公开失败一次，
+	// 再进入补偿 Destroy，不能直接 Idle/释放 lease。
+	FFU_OnlineOperationStateMachine JoinPostProcessMachine;
+	const FFU_OperationTicket Join = JoinPostProcessMachine.BeginAcceptedAttempt(EFU_OperationKind::Join);
+	const EFU_OperationAction JoinPostProcessFailure = JoinPostProcessMachine.HandleOriginalCompletion(
+		Join.Generation,
+		EFU_OperationKind::Join,
+		false,
+		true);
+	TestTrue(TEXT("Join 后处理失败广播一次公共失败"), EnumHasAnyFlags(JoinPostProcessFailure, EFU_OperationAction::BroadcastFailure));
+	TestTrue(TEXT("Join 后处理失败启动补偿 Destroy"), EnumHasAnyFlags(JoinPostProcessFailure, EFU_OperationAction::StartRecoveryDestroy));
+	TestFalse(TEXT("Join 后处理失败不直接释放 lease"), EnumHasAnyFlags(JoinPostProcessFailure, EFU_OperationAction::RequestLeaseRelease));
+	TestEqual(TEXT("Join 后处理失败保持 Recovering"), JoinPostProcessMachine.Get().Phase, EFU_OperationPhase::Recovering);
+
+	// 显式恢复必须同时看到原回调终态、NoSession、无活动/待定驱动及租约已释放；任一证据缺失都拒绝。
+	TestFalse(TEXT("原回调未终止时拒绝显式恢复"), BusyMachine.CanStartExplicitRecovery(false, true, true, true));
+	TestFalse(TEXT("仍有 Session 时拒绝显式恢复"), BusyMachine.CanStartExplicitRecovery(true, false, true, true));
+	TestFalse(TEXT("仍有驱动时拒绝显式恢复"), BusyMachine.CanStartExplicitRecovery(true, true, false, true));
+	TestFalse(TEXT("租约未释放时拒绝显式恢复"), BusyMachine.CanStartExplicitRecovery(true, true, true, false));
+	TestTrue(TEXT("四项安全证据齐全时允许显式恢复"), BusyMachine.CanStartExplicitRecovery(true, true, true, true));
+
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFUOnlineSessionDefaultResultTest,"FUOnlineSession.Types.DefaultResult",EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -179,6 +281,39 @@ bool FFUOnlineSessionNetDriverLeaseTest::RunTest(const FString& Parameters)
 		TEXT("所有 World 清空且完整指纹一致时才能恢复"),
 		FFU_OnlineSessionNetDriverLease::EvaluateRestore(Expected, Expected, true),
 		EFU_NetDriverLeaseResult::Restored);
+
+	// 【Task 6 RED：释放完成不是“可以再次 Acquire”】显式恢复需要一个只读结论：
+	// 只有游戏线程、进程未中毒且进程级租约已经不存在时才算完成；任何现存租约（含错误 owner/provider）
+	// 都 fail-closed，避免 TryRecoverProvider 把另一实例刚取得的租约误判为自己的释放完成。
+	FFU_NetDriverLeaseReleaseSnapshot ReleaseSnapshot;
+	TestFalse(
+		TEXT("非游戏线程的释放完成查询保守失败"),
+		FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(ReleaseSnapshot));
+	ReleaseSnapshot.bIsGameThread = true;
+	TestFalse(
+		TEXT("无有效 exact owner 时不能宣称释放完成"),
+		FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(ReleaseSnapshot));
+	ReleaseSnapshot.bOwnerValid = true;
+	ReleaseSnapshot.bProcessLeasePoisoned = true;
+	TestFalse(
+		TEXT("进程租约中毒后不能宣称安全释放"),
+		FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(ReleaseSnapshot));
+	ReleaseSnapshot.bProcessLeasePoisoned = false;
+	ReleaseSnapshot.bLeaseExists = true;
+	ReleaseSnapshot.bSameOwner = true;
+	ReleaseSnapshot.bSameProvider = true;
+	TestFalse(
+		TEXT("匹配 owner 和 provider 的租约仍存在时尚未释放"),
+		FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(ReleaseSnapshot));
+	ReleaseSnapshot.bSameOwner = false;
+	TestFalse(
+		TEXT("错误 owner 的现存租约不能被当成已安全释放"),
+		FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(ReleaseSnapshot));
+	ReleaseSnapshot.bLeaseExists = false;
+	ReleaseSnapshot.bSameProvider = false;
+	TestTrue(
+		TEXT("无租约且线程与进程状态安全时释放完成"),
+		FFU_OnlineSessionNetDriverLease::EvaluateReleaseComplete(ReleaseSnapshot));
 	return true;
 }
 
