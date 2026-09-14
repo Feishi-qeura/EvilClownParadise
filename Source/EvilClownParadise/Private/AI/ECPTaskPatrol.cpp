@@ -20,7 +20,8 @@ EStateTreeRunStatus FECPTaskPatrol::EnterState(FStateTreeExecutionContext& Conte
 	Monster -> SetMaxWalkSpeed(Monster -> PatrolSpeed);
 	
 	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
-	InstanceData.NextPickTime = 0.f;
+	InstanceData.NextPickTime = 0.f;         // 进场立刻出发去第一个点
+	InstanceData.bHeadingToTarget = false;
 	
 	return EStateTreeRunStatus::Running;
 }
@@ -38,17 +39,31 @@ EStateTreeRunStatus FECPTaskPatrol::Tick(FStateTreeExecutionContext& Context, co
 	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
 	const float now = Monster -> GetWorld()->GetTimeSeconds();
 	
-	const bool bMoveFinished = AIController -> GetMoveStatus() != EPathFollowingStatus::Moving;
-	if (bMoveFinished && InstanceData.NextPickTime <= now)
+	if (InstanceData.bHeadingToTarget)
 	{
+		// 到点判定：移动已结束，且已在目标附近。
+		// 距离阈值放宽到接受半径的两倍——停止时接受半径会额外加上胶囊体半径，留足余量。
+		const bool bMoveEnded = AIController -> GetMoveStatus() != EPathFollowingStatus::Moving;
+		const bool bCloseEnough = FVector::DistSquared(Monster -> GetActorLocation(), InstanceData.CurrentTarget)
+			<= FMath::Square(AcceptanceRadius * 2.f);
+		if (bMoveEnded && bCloseEnough)
+		{
+			InstanceData.bHeadingToTarget = false;
+			InstanceData.NextPickTime = now + PauseDuration;   // 到点后停顿
+		}
+	}
+	else if (now >= InstanceData.NextPickTime)
+	{
+		// 停顿结束（或刚进场）：选下一个巡逻点并出发
 		if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Monster -> GetWorld()))
 		{
 			FNavLocation NavLoc;
 			if (NavSys -> GetRandomReachablePointInRadius(Monster ->GetPatrolOrigin(), Monster -> PatrolRadius, NavLoc))
 			{
 				InstanceData.CurrentTarget = NavLoc.Location;
-				AIController -> MoveToLocation(NavLoc.Location);
-				InstanceData.NextPickTime = now + 0.5f;
+				// 请求失败（Failed）时保持"未出发"，下一帧自动重试选点
+				const EPathFollowingRequestResult::Type MoveResult = AIController -> MoveToLocation(NavLoc.Location, AcceptanceRadius);
+				InstanceData.bHeadingToTarget = (MoveResult != EPathFollowingRequestResult::Failed);
 			}
 		}
 	}

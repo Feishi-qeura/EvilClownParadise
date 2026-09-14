@@ -13,10 +13,15 @@ struct FECPTaskPatrolInstanceData
 {
 	GENERATED_BODY()
 	
+	/** 当前巡逻目标点 */
 	UPROPERTY(EditAnywhere, Category= "ECP|AI")
 	FVector CurrentTarget = FVector::ZeroVector;
 	
+	/** 停顿结束的时间（到达后 = 到达时间 + PauseDuration） */
 	float NextPickTime = 0.0f;
+	
+	/** 已发出移动请求、正在前往 CurrentTarget */
+	bool bHeadingToTarget = false;
 };
 
 USTRUCT()
@@ -25,6 +30,14 @@ struct FECPTaskPatrol : public FStateTreeTaskCommonBase
 	GENERATED_BODY()
 	
 	using FInstanceDataType = FECPTaskPatrolInstanceData;
+	
+	/** 到达巡逻点后的停顿时间（秒） */
+	UPROPERTY(EditAnywhere, Category= "ECP|AI")
+	float PauseDuration = 0.5f;
+	
+	/** 认定"已到达"的距离阈值（判定时放宽一倍），同时作为 MoveTo 的接受半径 */
+	UPROPERTY(EditAnywhere, Category= "ECP|AI")
+	float AcceptanceRadius = 100.f;
 	
 	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); };
 	

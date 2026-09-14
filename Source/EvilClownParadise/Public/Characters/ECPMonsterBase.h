@@ -48,7 +48,7 @@ public:
 	float PatrolSpeed = 200.f;
 	
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|AI")
-	float ChaseSpeed = 450.f;
+	float ChaseSpeed = 550.f;
 	
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|AI")
 	float AttackRange = 150.f;
