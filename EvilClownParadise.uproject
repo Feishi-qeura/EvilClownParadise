@@ -38,6 +38,9 @@
 		},
 		{
 			"Name": "OnlineSubsystemSteam",
+			"Enabled": true
+		},
+		{
 			"Name": "GameplayStateTree",
 			"Enabled": true
 		},
