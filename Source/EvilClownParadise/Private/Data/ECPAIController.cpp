@@ -26,6 +26,7 @@ AECPAIController::AECPAIController()
 	AIPerceptionComp = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("AIPerceptionComp"));
 	AIPerceptionComp -> ConfigureSense(*SightConfig);
 	AIPerceptionComp -> SetDominantSense(SightConfig -> GetSenseImplementation());
+	PerceptionComponent = AIPerceptionComp;
 }
 
 void AECPAIController::BeginPlay()
@@ -52,7 +53,10 @@ void AECPAIController::OnTargetPerceptionUpdated(AActor* Actor, struct FAIStimul
 	
 	if (Monster && Player && !Player -> IsDead())
 	{
-		Monster -> SetTarget(Player);
-		GEngine -> AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, FString::Printf(TEXT("%s看见了玩家：%s"), *Monster -> GetName(), *Player -> GetName()));
+		Monster -> SetTarget(Stimulus.WasSuccessfullySensed() ? Player : nullptr);
+		if (Stimulus.WasSuccessfullySensed())
+		{
+			GEngine -> AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, FString::Printf(TEXT("%s看见了玩家：%s"), *Monster -> GetName(), *Player -> GetName()));
+		}
 	}
 }
