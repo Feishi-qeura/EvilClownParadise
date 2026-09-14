@@ -1,0 +1,934 @@
+#include "Diagnostics/FU_OnlineSessionDiagnostics.h"
+
+#include "Diagnostics/SFU_OnlineDiagnosticOverlay.h"
+#include "FUOnlineSessionModule.h"
+#include "Engine/GameViewportClient.h"
+#include "GenericPlatform/GenericPlatformProperties.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformMisc.h"
+#include "Interfaces/IPluginManager.h"
+#include "Misc/App.h"
+#include "Misc/EngineVersion.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Widgets/SWidget.h"
+
+namespace FUOnlineSessionDiagnosticsPrivate
+{
+	/**
+	 * 输出限制不是用户可配项：它是诊断面向日志和 Blueprint 的安全边界。
+	 * 即使某个外部调用传来极大的错误文本或字段数组，也不能无限放大内存或报告文件。
+	 */
+	constexpr int32 MaxTextLength = 1024;
+	constexpr int32 MaxFieldValueLength = 256;
+	constexpr int32 MaxFieldCount = 32;
+
+	FString TruncateText(const FString& Value, const int32 Limit)
+	{
+		if (Value.Len() <= Limit)
+		{
+			return Value;
+		}
+
+		return Value.Left(Limit) + TEXT("…<truncated>");
+	}
+
+	bool IsSensitiveFieldKey(const FName Key)
+	{
+		const FString NormalizedKey = Key.ToString().ToLower();
+		// 【安全优先】使用包含匹配而不是白名单精确匹配，宁可多遮挡一个可疑字段，
+		// 也不能因为调用方使用 AuthTicket / RoomPassword 等变体而把凭据写进日志。
+		return NormalizedKey.Contains(TEXT("password"))
+			|| NormalizedKey.Contains(TEXT("passphrase"))
+			|| NormalizedKey.Contains(TEXT("token"))
+			|| NormalizedKey.Contains(TEXT("ticket"))
+			|| NormalizedKey.Contains(TEXT("secret"))
+			|| NormalizedKey.Contains(TEXT("auth"))
+			|| NormalizedKey.Contains(TEXT("credential"))
+			|| NormalizedKey.Contains(TEXT("steamid"))
+			|| NormalizedKey.Contains(TEXT("steam_id"))
+			|| NormalizedKey.Contains(TEXT("connectstring"));
+	}
+
+	bool IsInlineValueDelimiter(const TCHAR Character)
+	{
+		return FChar::IsWhitespace(Character)
+			|| Character == TEXT(',')
+			|| Character == TEXT(';')
+			|| Character == TEXT('&')
+			|| Character == TEXT(']')
+			|| Character == TEXT(')');
+	}
+
+	/**
+	 * 现有引擎错误文本有时会带 Key=Value 上下文。字段结构会被强制脱敏，
+	 * 这里再防御性处理 Message/Cause 等自由文本，覆盖 RoomPassword=xxx、Token:xxx 这类常见形式。
+	 */
+	FString RedactInlineSensitiveAssignments(const FString& Value, const int32 Limit)
+	{
+		FString Result = TruncateText(Value, Limit);
+		static const TCHAR* SensitiveMarkers[] =
+		{
+			TEXT("password"),
+			TEXT("passphrase"),
+			TEXT("token"),
+			TEXT("ticket"),
+			TEXT("secret"),
+			TEXT("auth"),
+			TEXT("credential"),
+			TEXT("steamid"),
+			TEXT("connectstring")
+		};
+
+		for (const TCHAR* Marker : SensitiveMarkers)
+		{
+			const FString MarkerString(Marker);
+			int32 SearchOffset = 0;
+			while (SearchOffset < Result.Len())
+			{
+				const int32 MarkerIndex = Result.Find(
+					MarkerString,
+					ESearchCase::IgnoreCase,
+					ESearchDir::FromStart,
+					SearchOffset);
+				if (MarkerIndex == INDEX_NONE)
+				{
+					break;
+				}
+
+				int32 ValueStart = MarkerIndex + MarkerString.Len();
+				while (ValueStart < Result.Len() && FChar::IsWhitespace(Result[ValueStart]))
+				{
+					++ValueStart;
+				}
+
+				if (ValueStart >= Result.Len() || (Result[ValueStart] != TEXT('=') && Result[ValueStart] != TEXT(':')))
+				{
+					SearchOffset = MarkerIndex + MarkerString.Len();
+					continue;
+				}
+
+				++ValueStart;
+				while (ValueStart < Result.Len() && FChar::IsWhitespace(Result[ValueStart]))
+				{
+					++ValueStart;
+				}
+
+				int32 ValueEnd = ValueStart;
+				if (ValueStart < Result.Len() && (Result[ValueStart] == TEXT('\"') || Result[ValueStart] == TEXT('\'')))
+				{
+					const TCHAR Quote = Result[ValueStart++];
+					ValueEnd = ValueStart;
+					while (ValueEnd < Result.Len() && Result[ValueEnd] != Quote)
+					{
+						++ValueEnd;
+					}
+					if (ValueEnd < Result.Len())
+					{
+						++ValueEnd;
+					}
+					// 将开引号也覆盖，避免日志留下不完整且容易误导的凭据片段。
+					--ValueStart;
+				}
+				else
+				{
+					while (ValueEnd < Result.Len() && !IsInlineValueDelimiter(Result[ValueEnd]))
+					{
+						++ValueEnd;
+					}
+				}
+
+				Result = Result.Left(ValueStart) + TEXT("<redacted>") + Result.Mid(ValueEnd);
+				SearchOffset = ValueStart + FCString::Strlen(TEXT("<redacted>"));
+			}
+		}
+
+		return Result;
+	}
+
+	const TCHAR* ToText(const EFU_OnlineDiagnosticSeverity Severity)
+	{
+		switch (Severity)
+		{
+		case EFU_OnlineDiagnosticSeverity::Verbose: return TEXT("Verbose");
+		case EFU_OnlineDiagnosticSeverity::Info: return TEXT("Info");
+		case EFU_OnlineDiagnosticSeverity::Warning: return TEXT("Warning");
+		case EFU_OnlineDiagnosticSeverity::Error: return TEXT("Error");
+		default: return TEXT("Unknown");
+		}
+	}
+
+	const TCHAR* ToText(const EFU_OnlineProvider Provider)
+	{
+		return Provider == EFU_OnlineProvider::Steam ? TEXT("Steam") : TEXT("Lan/NULL");
+	}
+
+	const TCHAR* ToText(const EFU_OnlineDiagnosticOperation Operation)
+	{
+		switch (Operation)
+		{
+		case EFU_OnlineDiagnosticOperation::Environment: return TEXT("Environment");
+		case EFU_OnlineDiagnosticOperation::CreateSession: return TEXT("CreateSession");
+		case EFU_OnlineDiagnosticOperation::FindSessions: return TEXT("FindSessions");
+		case EFU_OnlineDiagnosticOperation::JoinSession: return TEXT("JoinSession");
+		case EFU_OnlineDiagnosticOperation::DestroySession: return TEXT("DestroySession");
+		case EFU_OnlineDiagnosticOperation::NetDriverLease: return TEXT("NetDriverLease");
+		case EFU_OnlineDiagnosticOperation::AppIdBootstrap: return TEXT("AppIdBootstrap");
+		case EFU_OnlineDiagnosticOperation::LegacyConfigMigration: return TEXT("LegacyConfigMigration");
+		case EFU_OnlineDiagnosticOperation::Recovery: return TEXT("Recovery");
+		default: return TEXT("Unknown");
+		}
+	}
+
+	const TCHAR* ToText(const EFU_OnlineDiagnosticPhase Phase)
+	{
+		switch (Phase)
+		{
+		case EFU_OnlineDiagnosticPhase::Requested: return TEXT("Requested");
+		case EFU_OnlineDiagnosticPhase::Preflight: return TEXT("Preflight");
+		case EFU_OnlineDiagnosticPhase::Submitted: return TEXT("Submitted");
+		case EFU_OnlineDiagnosticPhase::Callback: return TEXT("Callback");
+		case EFU_OnlineDiagnosticPhase::Timeout: return TEXT("Timeout");
+		case EFU_OnlineDiagnosticPhase::Recovery: return TEXT("Recovery");
+		case EFU_OnlineDiagnosticPhase::Completed: return TEXT("Completed");
+		default: return TEXT("Unknown");
+		}
+	}
+
+	FString FormatFields(const TArray<FFU_OnlineDiagnosticField>& Fields)
+	{
+		FString Result;
+		for (const FFU_OnlineDiagnosticField& Field : Fields)
+		{
+			if (!Result.IsEmpty())
+			{
+				Result += TEXT(", ");
+			}
+
+			Result += Field.Key.ToString();
+			Result += TEXT("=");
+			Result += Field.Value;
+		}
+		return Result;
+	}
+}
+
+void FFU_OnlineDiagnosticOverlayModel::Add(
+	const FFU_OnlineDiagnosticEvent& Event,
+	const FFU_OnlineDiagnosticDispatchConfig& Config,
+	const FDateTime NowUtc)
+{
+	// 【显示与记录分离】浮层是可选输出，历史和 Blueprint 不因低严重级别/无 Viewport 而被抑制。
+	if (!Config.bEnableOverlay || static_cast<uint8>(Event.Severity) < static_cast<uint8>(Config.MinimumOverlaySeverity))
+	{
+		return;
+	}
+
+	FFU_OnlineDiagnosticOverlayRow& Row = Rows.AddDefaulted_GetRef();
+	Row.ExpiresAtUtc = NowUtc + FTimespan::FromSeconds(FMath::Max(1.0f, Config.OverlayDurationSeconds));
+	Row.Severity = Event.Severity;
+	Row.Text = FString::Printf(
+		TEXT("[FU][%s][%s] %s"),
+		FUOnlineSessionDiagnosticsPrivate::ToText(Event.Severity),
+		*Event.Code,
+		*Event.Message);
+
+	// 【有界浮层】即使发生连续网络故障，Slate 每帧也只需渲染有限数量的行。
+	const int32 RowLimit = FMath::Max(1, Config.OverlayRowLimit);
+	if (Rows.Num() > RowLimit)
+	{
+		Rows.RemoveAt(0, Rows.Num() - RowLimit, EAllowShrinking::No);
+	}
+}
+
+TArray<FFU_OnlineDiagnosticOverlayRow> FFU_OnlineDiagnosticOverlayModel::GetVisibleRows(const FDateTime NowUtc) const
+{
+	TArray<FFU_OnlineDiagnosticOverlayRow> VisibleRows;
+	for (const FFU_OnlineDiagnosticOverlayRow& Row : Rows)
+	{
+		if (Row.ExpiresAtUtc > NowUtc)
+		{
+			VisibleRows.Add(Row);
+		}
+	}
+
+	return VisibleRows;
+}
+
+FFU_OnlineSessionDiagnostics::FFU_OnlineSessionDiagnostics(
+	const FFU_OnlineDiagnosticDispatchConfig& InConfig,
+	TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast,
+	FReportWriter InReportWriter,
+	FLogSink InLogSink,
+	FProviderLogWriter InProviderLogWriter)
+	: Config(InConfig)
+	, BlueprintBroadcast(MoveTemp(InBlueprintBroadcast))
+	, ReportWriter(MoveTemp(InReportWriter))
+	, LogSink(MoveTemp(InLogSink))
+	, ProviderLogWriter(MoveTemp(InProviderLogWriter))
+	, OverlayModel(MakeShared<FFU_OnlineDiagnosticOverlayModel>())
+{
+	// 【运行时防御】Subsystem 已消毒配置；这里仍做最小边界保护，让私有测试或未来调用者不会创建无界容器。
+	Config.HistoryLimit = FMath::Clamp(Config.HistoryLimit, 1, 1000);
+	Config.OverlayDurationSeconds = FMath::Clamp(Config.OverlayDurationSeconds, 1.0f, 60.0f);
+	Config.OverlayRowLimit = FMath::Clamp(Config.OverlayRowLimit, 1, 20);
+	// 使用 UE 当前运行环境的 Saved/Logs，而非插件安装目录；打包程序也无需写入只读插件内容。
+	ProviderLogRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(
+		FPaths::ProjectLogDir(), TEXT("FUOnlineSession"), TEXT("OnlineSubsystemLog")));
+	ProviderLogFilename = FString::Printf(TEXT("FUOnlineSession-%s-%s.log"),
+		*FDateTime::UtcNow().ToString(TEXT("%Y%m%d-%H%M%S")), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	if (!ProviderLogWriter)
+	{
+		// 每条事件完成追加后即关闭文件：不依赖正常退出时集中导出，也不受内存历史条数限制。
+		ProviderLogWriter = [](const FString& Contents, const FString& Destination)
+		{
+			return IFileManager::Get().MakeDirectory(*FPaths::GetPath(Destination), true)
+				&& FFileHelper::SaveStringToFile(Contents, *Destination,
+					FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
+		};
+	}
+	if (!ReportWriter)
+	{
+		// 【默认生产写入器】测试可注入失败 writer；运行时仍保持既有受限路径与 UTF-8 报告格式。
+		ReportWriter = [](const FString& Contents, const FString& Destination, FString& OutRawFailureDetail)
+		{
+			return FFileHelper::SaveStringToFile(
+				Contents,
+				*Destination,
+				FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		};
+	}
+	if (!LogSink)
+	{
+		LogSink = [](const FFU_OnlineDiagnosticEvent& Event, const FString&)
+		{
+			WriteToLog(Event);
+		};
+	}
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::Emit(const FFU_OnlineDiagnosticEvent& CandidateEvent)
+{
+	// 最多为原事件附加一条磁盘故障事件；先完成内部写入，再进入可能重入/销毁 Subsystem 的 Blueprint。
+	TArray<FFU_OnlineDiagnosticEvent, TInlineAllocator<2>> Events;
+	Events.Add(Sanitize(CandidateEvent));
+	for (int32 Index = 0; Index < Events.Num(); ++Index)
+	{
+		// 序号仍只由分发器分配；局部副本避免追加故障事件时引用容器元素失效。
+		Events[Index].Sequence = ++NextSequence;
+		const FFU_OnlineDiagnosticEvent Event = Events[Index];
+		History.Add(Event);
+		if (History.Num() > Config.HistoryLimit)
+		{
+			History.RemoveAt(0, History.Num() - Config.HistoryLimit, EAllowShrinking::No);
+		}
+		if (Config.bEmitToLog)
+		{
+			const FString Line = FormatEventForOutput(Event);
+			LogSink(Event, Line);
+			const FString Destination = GetProviderLogPath(Event.Provider);
+			// 仅合法 Provider 可进入固定目录；屏幕严重级别过滤不影响磁盘完整事件流。
+			if (!Destination.IsEmpty() && !FailedFileProviders.Contains(Event.Provider)
+				&& !ProviderLogWriter(FString::Printf(TEXT("[%s] %s%s"),
+					*Event.TimestampUtc.ToIso8601(), *Line, LINE_TERMINATOR), Destination))
+			{
+				// 先熔断再追加反馈，因此反馈自身不会再次写入故障文件。另一个 Provider 不受影响。
+				FailedFileProviders.Add(Event.Provider);
+				FFU_OnlineDiagnosticEvent Failure;
+				Failure.Provider = Event.Provider;
+				Failure.OperationId = Event.OperationId;
+				Failure.WorldName = Event.WorldName;
+				Failure.PIEInstanceId = Event.PIEInstanceId;
+				Failure.Operation = EFU_OnlineDiagnosticOperation::Environment;
+				Failure.Phase = EFU_OnlineDiagnosticPhase::Completed;
+				Failure.Severity = EFU_OnlineDiagnosticSeverity::Error;
+				Failure.Code = TEXT("FU.Diagnostics.ProviderLogWriteFailed");
+				Failure.Status = TEXT("FileLoggingDisabled");
+				Failure.Message = TEXT("无法创建或追加 Provider 日志，当前 GameInstance 已停止该 Provider 的文件写入；其他诊断通道继续工作");
+				Failure.Cause = TEXT("目录创建或文件追加返回失败；未采集原始系统错误，具体原因需检查磁盘环境");
+				Failure.RecommendedAction = TEXT("用 GetProviderLogPath 获取路径，检查目录权限、磁盘空间和文件占用，修复后重启游戏或 PIE；可用 SaveDiagnosticReport 导出近期历史");
+				Events.Add(Sanitize(Failure));
+			}
+		}
+		// 无 Viewport 也能继续留存诊断；浮层过期不会删除文件或历史。
+		OverlayModel->Add(Event, Config, FDateTime::UtcNow());
+	}
+
+	// 复制回调和事件后不再访问 this，避免 Blueprint 触发生命周期变更后继续访问已销毁分发器。
+	const auto Broadcast = BlueprintBroadcast;
+	if (Broadcast)
+	{
+		for (const FFU_OnlineDiagnosticEvent& Event : Events)
+		{
+			Broadcast(Event);
+		}
+	}
+	return Events[0];
+}
+
+FString FFU_OnlineSessionDiagnostics::GetProviderLogPath(const EFU_OnlineProvider Provider) const
+{
+	// 目录名来自白名单常量，不接受房间名、错误文本或 Blueprint 自定义路径。
+	switch (Provider)
+	{
+	case EFU_OnlineProvider::Steam:
+		return FPaths::Combine(ProviderLogRoot, TEXT("steam_log"), ProviderLogFilename);
+	case EFU_OnlineProvider::Lan:
+		return FPaths::Combine(ProviderLogRoot, TEXT("lan_log"), ProviderLogFilename);
+	default:
+		return FString();
+	}
+}
+
+TArray<FFU_OnlineDiagnosticEvent> FFU_OnlineSessionDiagnostics::GetHistory() const
+{
+	return History;
+}
+
+void FFU_OnlineSessionDiagnostics::ClearHistory()
+{
+	History.Reset();
+}
+
+FString FFU_OnlineSessionDiagnostics::BuildReport() const
+{
+	FString PluginVersion = TEXT("Unknown");
+	if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("FUOnlineSession")))
+	{
+		PluginVersion = Plugin->GetDescriptor().VersionName;
+	}
+
+	FString Report;
+	Report += TEXT("FU Online Session Diagnostic Report\n");
+	Report += FString::Printf(TEXT("GeneratedUtc: %s\n"), *FDateTime::UtcNow().ToIso8601());
+	Report += FString::Printf(TEXT("PluginVersion: %s\n"), *PluginVersion);
+	Report += FString::Printf(TEXT("Project: %s\n"), FApp::GetProjectName());
+	Report += FString::Printf(TEXT("Engine: %s\n"), *FEngineVersion::Current().ToString());
+	Report += FString::Printf(TEXT("Platform: %s\n"), ANSI_TO_TCHAR(FPlatformProperties::PlatformName()));
+	Report += FString::Printf(TEXT("BuildConfiguration: %s\n"), LexToString(FApp::GetBuildConfiguration()));
+	Report += FString::Printf(TEXT("HistoryCount: %d\n\n"), History.Num());
+
+	for (const FFU_OnlineDiagnosticEvent& Event : History)
+	{
+		Report += FString::Printf(
+			TEXT("[%s] [Seq=%lld] [%s] Op=%s/%s Provider=%s Id=%s World=%s PIE=%d Code=%s Status=%s\n"),
+			*Event.TimestampUtc.ToIso8601(),
+			Event.Sequence,
+			FUOnlineSessionDiagnosticsPrivate::ToText(Event.Severity),
+			FUOnlineSessionDiagnosticsPrivate::ToText(Event.Operation),
+			FUOnlineSessionDiagnosticsPrivate::ToText(Event.Phase),
+			FUOnlineSessionDiagnosticsPrivate::ToText(Event.Provider),
+			*Event.OperationId.ToString(),
+			*Event.WorldName,
+			Event.PIEInstanceId,
+			*Event.Code,
+			*Event.Status);
+		Report += FString::Printf(TEXT("  Message: %s\n"), *Event.Message);
+		Report += FString::Printf(TEXT("  Cause: %s\n"), *Event.Cause);
+		Report += FString::Printf(TEXT("  RecommendedAction: %s\n"), *Event.RecommendedAction);
+		if (!Event.Fields.IsEmpty())
+		{
+			Report += FString::Printf(
+				TEXT("  Fields: %s\n"),
+				*FUOnlineSessionDiagnosticsPrivate::FormatFields(Event.Fields));
+		}
+		Report += TEXT("\n");
+	}
+
+	return Report;
+}
+
+bool FFU_OnlineSessionDiagnostics::SaveReport(FString& OutSavedPath, FString& OutError)
+{
+	OutSavedPath.Reset();
+	OutError.Reset();
+
+	// 【路径收束】报告只能写到项目 Saved/Logs，不能由 Blueprint 或错误文本影响写入目标。
+	const FString ReportDirectory = FPaths::Combine(FPaths::ProjectLogDir(), TEXT("FUOnlineSession"));
+	if (!IFileManager::Get().MakeDirectory(*ReportDirectory, true))
+	{
+		OutError = TEXT("无法创建 FUOnlineSession 诊断报告目录");
+		// Emit 不会再次调用 SaveReport；自动 Provider 文件也有独立熔断，不会在磁盘故障时递归。
+		FFU_OnlineDiagnosticEvent FailureEvent;
+		FailureEvent.Operation = EFU_OnlineDiagnosticOperation::Environment;
+		FailureEvent.Phase = EFU_OnlineDiagnosticPhase::Completed;
+		FailureEvent.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		FailureEvent.Code = TEXT("FU.Diagnostics.ReportSaveFailed");
+		FailureEvent.Status = TEXT("CreateDirectoryFailed");
+		FailureEvent.Message = OutError;
+		FailureEvent.RecommendedAction = TEXT("检查项目 Saved/Logs 目录是否可写，然后重新保存诊断报告");
+		Emit(FailureEvent);
+		return false;
+	}
+
+	const FString Filename = FString::Printf(
+		TEXT("FUOnlineSession-Diagnostics-%s.txt"),
+		*FDateTime::UtcNow().ToString(TEXT("yyyyMMdd-HHmmss-fff")));
+	const FString SavedPath = FPaths::Combine(ReportDirectory, Filename);
+	FString RawWriterFailureDetail;
+	if (!ReportWriter(BuildReport(), SavedPath, RawWriterFailureDetail))
+	{
+		OutError = TEXT("无法写入 FUOnlineSession 诊断报告");
+		FFU_OnlineDiagnosticEvent FailureEvent;
+		FailureEvent.Operation = EFU_OnlineDiagnosticOperation::Environment;
+		FailureEvent.Phase = EFU_OnlineDiagnosticPhase::Completed;
+		FailureEvent.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		FailureEvent.Code = TEXT("FU.Diagnostics.ReportSaveFailed");
+		FailureEvent.Status = TEXT("WriteFailed");
+		FailureEvent.Message = OutError;
+		FailureEvent.RecommendedAction = TEXT("检查磁盘空间、文件锁定和项目 Saved/Logs 写入权限后重试");
+		Emit(FailureEvent);
+		return false;
+	}
+
+	OutSavedPath = SavedPath;
+	return true;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::Sanitize(const FFU_OnlineDiagnosticEvent& CandidateEvent)
+{
+	FFU_OnlineDiagnosticEvent Result = CandidateEvent;
+	if (Result.TimestampUtc.GetTicks() == 0)
+	{
+		Result.TimestampUtc = FDateTime::UtcNow();
+	}
+	if (!Result.OperationId.IsValid())
+	{
+		// 每一个独立事件至少有唯一 ID；Task 7 的异步操作会复用同一个 ID 串起多个阶段。
+		Result.OperationId = FGuid::NewGuid();
+	}
+
+	Result.Code = FUOnlineSessionDiagnosticsPrivate::RedactInlineSensitiveAssignments(Result.Code, FUOnlineSessionDiagnosticsPrivate::MaxTextLength);
+	Result.Status = FUOnlineSessionDiagnosticsPrivate::RedactInlineSensitiveAssignments(Result.Status, FUOnlineSessionDiagnosticsPrivate::MaxTextLength);
+	Result.WorldName = FUOnlineSessionDiagnosticsPrivate::RedactInlineSensitiveAssignments(Result.WorldName, FUOnlineSessionDiagnosticsPrivate::MaxTextLength);
+	Result.Message = FUOnlineSessionDiagnosticsPrivate::RedactInlineSensitiveAssignments(Result.Message, FUOnlineSessionDiagnosticsPrivate::MaxTextLength);
+	Result.Cause = FUOnlineSessionDiagnosticsPrivate::RedactInlineSensitiveAssignments(Result.Cause, FUOnlineSessionDiagnosticsPrivate::MaxTextLength);
+	Result.RecommendedAction = FUOnlineSessionDiagnosticsPrivate::RedactInlineSensitiveAssignments(Result.RecommendedAction, FUOnlineSessionDiagnosticsPrivate::MaxTextLength);
+
+	Result.Fields.Reset();
+	for (const FFU_OnlineDiagnosticField& CandidateField : CandidateEvent.Fields)
+	{
+		if (Result.Fields.Num() >= FUOnlineSessionDiagnosticsPrivate::MaxFieldCount)
+		{
+			break;
+		}
+
+		FFU_OnlineDiagnosticField& SanitizedField = Result.Fields.AddDefaulted_GetRef();
+		SanitizedField.Key = CandidateField.Key;
+		SanitizedField.Value = FUOnlineSessionDiagnosticsPrivate::IsSensitiveFieldKey(CandidateField.Key)
+			? TEXT("<redacted>")
+			: FUOnlineSessionDiagnosticsPrivate::RedactInlineSensitiveAssignments(
+				CandidateField.Value,
+				FUOnlineSessionDiagnosticsPrivate::MaxFieldValueLength);
+	}
+
+	return Result;
+}
+
+TOptional<FFU_OnlineDiagnosticEvent> FFU_OnlineSessionDiagnostics::BuildUnsupportedRecoveryProviderDiagnostic(
+	const EFU_OnlineProvider Provider)
+{
+	if (Provider == EFU_OnlineProvider::Steam || Provider == EFU_OnlineProvider::Lan)
+	{
+		return TOptional<FFU_OnlineDiagnosticEvent>();
+	}
+
+	// 非法枚举可能来自损坏存档、反射调用或未来版本错配；事件故意不回显原始数值、
+	// 房间参数或连接上下文，只公开稳定错误码和修复方向，避免诊断路径扩大敏感输入面。
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::Recovery;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Preflight;
+	Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+	Event.Code = TEXT("FU.Recovery.Rejected.UnsupportedProvider");
+	Event.Status = TEXT("Rejected");
+	Event.Message = TEXT("TryRecoverProvider 收到不支持的 Provider，未读取或修改任何 Provider 状态");
+	Event.RecommendedAction = TEXT("检查 Blueprint 枚举接线或版本兼容性后重试");
+	return Event;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildLateCallback(
+	const EFU_OnlineProvider Provider,
+	const EFU_OnlineDiagnosticOperation Operation,
+	const FGuid& OperationId,
+	const bool bSucceeded,
+	const EFU_OperationAction Actions)
+{
+	// 【A1 安全事件】只从已验证的 operation、布尔终态和状态机 action 派生有限结果；
+	// 不接收 SessionId、连接串、密码或 OSS 原始错误，因而不会把敏感数据带进统一输出。
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = Operation;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = bSucceeded ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning;
+	const TCHAR* OperationStem = Operation == EFU_OnlineDiagnosticOperation::CreateSession
+		? TEXT("FU.CreateSession.Recovery")
+		: Operation == EFU_OnlineDiagnosticOperation::JoinSession
+			? TEXT("FU.JoinSession.Recovery")
+			: TEXT("FU.Operation.Recovery");
+	Event.Code = FString::Printf(
+		TEXT("%s.%s"),
+		OperationStem,
+		bSucceeded ? TEXT("LateCallbackSucceeded") : TEXT("LateCallbackFailed"));
+	const bool bRecoveryDestroyRequested = EnumHasAnyFlags(Actions, EFU_OperationAction::StartRecoveryDestroy);
+	Event.Status = bRecoveryDestroyRequested
+		? TEXT("RecoveryDestroyRequested")
+		: TEXT("RecoveryDestroyNotRequested");
+	Event.Message = bRecoveryDestroyRequested
+		? TEXT("迟到回调已由状态机接收；根请求保持已完成失败，并请求补偿 Destroy")
+		: TEXT("迟到回调已由状态机接收；根请求保持已完成失败，未请求补偿 Destroy");
+	Event.RecommendedAction = TEXT("等待恢复 Destroy、租约和全 World 安全条件收敛；不得再次发出旧完成事件或旅行");
+	return Event;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildRecoveringFindOriginal(
+	const EFU_OnlineProvider Provider,
+	const FGuid& OperationId,
+	const bool bSucceeded,
+	const EFU_OperationAction Actions)
+{
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::FindSessions;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = bSucceeded ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning;
+	const bool bOriginalWonCancelRace =
+		EnumHasAnyFlags(Actions, EFU_OperationAction::ClearFindCancellationDelegate);
+	Event.Code = bOriginalWonCancelRace
+		? TEXT("FU.FindSessions.Recovery.OriginalWonCancelRace")
+		: TEXT("FU.FindSessions.Recovery.OriginalCompletedAfterCancelRequest");
+	Event.Status = bSucceeded ? TEXT("Succeeded") : TEXT("Failed");
+	Event.Message = bOriginalWonCancelRace
+		? TEXT("原 Find 回调先于取消完成到达；状态机已决定同时清理原 Find 与取消委托")
+		: TEXT("取消请求未终止原 Find；原 Find 回调现已到达并由状态机决定精确清理");
+	Event.RecommendedAction = TEXT("该超时根请求已经完成失败；仅等待内部资源清理，不得再次广播搜索结果");
+	return Event;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildFindCancellation(
+	const EFU_OnlineProvider Provider,
+	const FGuid& OperationId,
+	const EFU_FindCancellationDiagnosticOutcome Outcome)
+{
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::FindSessions;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = EFU_OnlineDiagnosticSeverity::Info;
+	Event.RecommendedAction = TEXT("保持原 Find completion 为唯一内部终点，直到状态机确认取消或原回调获胜");
+
+	// 每个分支只输出固定有限词汇；默认分支也不回显未知枚举数值，避免诊断本身扩大输入面。
+	switch (Outcome)
+	{
+	case EFU_FindCancellationDiagnosticOutcome::InterfaceUnavailable:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.FindSessions.Cancel.InterfaceUnavailable");
+		Event.Status = TEXT("WaitingForOriginal");
+		Event.Message = TEXT("Find 超时后 Session Interface 已不可用；取消无法提交，继续等待原 Find 回调");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::DelegateBound:
+		Event.Code = TEXT("FU.FindSessions.Cancel.DelegateBound");
+		Event.Status = TEXT("Pending");
+		Event.Message = TEXT("已为同一 generation 绑定 CancelFindSessions 完成委托");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::RequestSubmitted:
+		Event.Code = TEXT("FU.FindSessions.Cancel.RequestSubmitted");
+		Event.Status = TEXT("Pending");
+		Event.Message = TEXT("CancelFindSessions 请求已由接口接收，等待取消与原 Find 的竞争终态");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::SynchronousRejected:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.FindSessions.Cancel.SynchronousRejected");
+		Event.Status = TEXT("WaitingForOriginal");
+		Event.Message = TEXT("CancelFindSessions 同步返回 false；仅清取消委托并继续等待原 Find 回调");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::CancelWonRace:
+		Event.Code = TEXT("FU.FindSessions.Cancel.Completed");
+		Event.Status = TEXT("CancelWonRace");
+		Event.Message = TEXT("取消完成成功并赢得竞争；状态机已授权清理原 Find、取消委托和待定搜索数据");
+		break;
+	case EFU_FindCancellationDiagnosticOutcome::FailedWaitingForOriginal:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.FindSessions.Cancel.Failed");
+		Event.Status = TEXT("WaitingForOriginal");
+		Event.Message = TEXT("取消完成失败；状态机仅清取消委托，继续等待原 Find 回调作为唯一终点");
+		break;
+	default:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		Event.Code = TEXT("FU.FindSessions.Cancel.InvalidOutcome");
+		Event.Status = TEXT("Rejected");
+		Event.Message = TEXT("Find 取消诊断收到未支持的内部 outcome，未附带原始参数");
+		break;
+	}
+	return Event;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineOperationPathDiagnostics::BuildRecoveryDestroy(
+	const EFU_OnlineProvider Provider,
+	const FGuid& OperationId,
+	const EFU_RecoveryDestroyDiagnosticOutcome Outcome,
+	const bool bSessionStillExists,
+	const EFU_OperationAction Actions)
+{
+	// 【A2 纯 outcome policy】只消费已验证状态的有限布尔/action；不接收 DestroySession 的
+	// 原始 Provider 文本、会话标识或连接信息，所有输出可安全进入日志、历史和 Blueprint。
+	FFU_OnlineDiagnosticEvent Event;
+	Event.Provider = Provider;
+	Event.Operation = EFU_OnlineDiagnosticOperation::Recovery;
+	Event.OperationId = OperationId;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Recovery;
+	Event.Severity = EFU_OnlineDiagnosticSeverity::Info;
+	Event.RecommendedAction = TEXT("保持根请求 exactly-once；等待恢复 Destroy 回调及租约/World 安全证据后再完成恢复");
+	const bool bLeaseReleaseRequested =
+		EnumHasAnyFlags(Actions, EFU_OperationAction::RequestLeaseRelease);
+
+	switch (Outcome)
+	{
+	case EFU_RecoveryDestroyDiagnosticOutcome::InterfaceUnavailable:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		Event.Code = TEXT("FU.Recovery.Destroy.InterfaceUnavailable");
+		Event.Status = TEXT("Blocked");
+		Event.Message = TEXT("Session Interface 不可用，无法安全提交恢复 Destroy");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::NoSession:
+		Event.Code = TEXT("FU.Recovery.Destroy.NoSession");
+		Event.Status = TEXT("NoDestroyNeeded");
+		Event.Message = TEXT("命名会话已不存在，无需提交恢复 Destroy；继续等待租约与 World 安全收敛");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::StateRejected:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.StateRejected");
+		Event.Status = TEXT("Rejected");
+		Event.Message = TEXT("状态机拒绝恢复 Destroy 提交；未绑定 delegate、timer 或修改 pending 数据");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::SubmitAccepted:
+		Event.Code = TEXT("FU.Recovery.Destroy.SubmitAccepted");
+		Event.Status = TEXT("Pending");
+		Event.Message = TEXT("状态机已接受恢复 Destroy generation；即将绑定精确 delegate 并提交 OSS 请求");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::SynchronousRejected:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.SynchronousRejected");
+		Event.Status = bLeaseReleaseRequested
+			? TEXT("LeaseReleaseRequested")
+			: bSessionStillExists ? TEXT("SessionStillExists") : TEXT("NoSessionObserved");
+		Event.Message = TEXT("DestroySession 同步返回 false；状态机已决定后续精确清理和租约动作");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::CallbackSucceeded:
+		Event.Code = TEXT("FU.Recovery.Destroy.CallbackSucceeded");
+		Event.Status = bLeaseReleaseRequested ? TEXT("LeaseReleaseRequested") : TEXT("NoSession");
+		Event.Message = TEXT("恢复 Destroy 回调确认命名会话已移除；状态机已授权会话层收敛");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::CallbackFailed:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.CallbackFailed");
+		Event.Status = bLeaseReleaseRequested
+			? TEXT("LeaseReleaseRequested")
+			: bSessionStillExists ? TEXT("SessionStillExists") : TEXT("NoSessionObserved");
+		Event.Message = TEXT("恢复 Destroy 回调未报告成功；状态机已按本地命名会话证据决定后续动作");
+		break;
+	case EFU_RecoveryDestroyDiagnosticOutcome::RepeatedTimeout:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+		Event.Code = TEXT("FU.Recovery.Destroy.RepeatedTimeout");
+		Event.Status = TEXT("WaitingForCallback");
+		Event.Message = TEXT("根请求失败后的恢复 Destroy 再次超时；保留原 Destroy delegate 等待真实终态");
+		break;
+	default:
+		Event.Severity = EFU_OnlineDiagnosticSeverity::Error;
+		Event.Code = TEXT("FU.Recovery.Destroy.InvalidOutcome");
+		Event.Status = TEXT("Rejected");
+		Event.Message = TEXT("恢复 Destroy 诊断收到未支持的内部 outcome，未附带原始参数");
+		break;
+	}
+	return Event;
+}
+
+FFU_OnlineOperationPathDispatchResult FFU_OnlineOperationPathDispatcher::DispatchInternal(
+	const TOptional<FFU_OnlineDiagnosticEvent>& Event,
+	const uint64 CompletedGeneration,
+	const bool bRequestRecoveryDestroy,
+	const FFU_OnlineOperationPathDispatchSinks& Sinks)
+{
+	FFU_OnlineOperationPathDispatchResult Result;
+	// 【stale 安全】没有经过状态机验证并携带根 ID 的事件不得触发任何可观测或清理动作。
+	if (!Event.IsSet() || !Event->OperationId.IsValid() || CompletedGeneration == 0)
+	{
+		return Result;
+	}
+
+	// 诊断必须先看到状态机已经作出的决定；它可以同步触发 Blueprint 并启动下一 generation。
+	if (Sinks.Diagnostic)
+	{
+		Sinks.Diagnostic(Event.GetValue());
+		Result.bDiagnostic = true;
+	}
+
+	// 即使发生重入，也必须通过预先捕获的接口/Handle 清掉旧注册，不能把旧回调永久留在 OSS。
+	if (Sinks.ExactOldResourceCleanup)
+	{
+		Sinks.ExactOldResourceCleanup();
+		Result.bExactOldResourceCleanup = true;
+	}
+
+	// 共享字段和恢复续步只能属于仍然活跃的已完成 generation；同步重入换代后必须立即止步。
+	if (!Sinks.CurrentGeneration
+		|| Sinks.CurrentGeneration() != CompletedGeneration
+		|| !Sinks.SharedResourcesStillMatch
+		|| !Sinks.SharedResourcesStillMatch())
+	{
+		return Result;
+	}
+	if (Sinks.GenerationMatchedCleanup)
+	{
+		Sinks.GenerationMatchedCleanup();
+		Result.bGenerationMatchedCleanup = true;
+	}
+	if (bRequestRecoveryDestroy && Sinks.RecoveryDestroySubmission)
+	{
+		Sinks.RecoveryDestroySubmission();
+		Result.bRecoveryDestroySubmission = true;
+	}
+
+	// LegacyCompletion 与 Travel 是刻意接入但被执行计划固定禁止的 sink：内部恢复只能收敛。
+	// 保留显式分支与 Result flag，使测试能证明两个 production sink 已连接且策略选择“不调用”。
+	if (Result.bLegacyCompletion && Sinks.LegacyCompletion)
+	{
+		Sinks.LegacyCompletion();
+	}
+	if (Result.bTravel && Sinks.Travel)
+	{
+		Sinks.Travel();
+	}
+	return Result;
+}
+
+FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
+	const EFU_OnlineProvider Provider,
+	const EFU_OnlineDiagnosticOperation Operation,
+	const FGuid& OperationId,
+	const bool bIsReady,
+	const FString& Code,
+	const FString& Message)
+{
+	FFU_OnlineDiagnosticEvent Event;
+	Event.OperationId = OperationId;
+	Event.Provider = Provider;
+	Event.Operation = Operation;
+	Event.Phase = EFU_OnlineDiagnosticPhase::Preflight;
+	Event.Severity = bIsReady ? EFU_OnlineDiagnosticSeverity::Info : EFU_OnlineDiagnosticSeverity::Warning;
+	Event.Code = Code;
+	Event.Status = bIsReady ? TEXT("Ready") : TEXT("Rejected");
+	Event.Message = Message;
+	Event.RecommendedAction = bIsReady
+		? TEXT("环境已就绪；可继续调用对应的 Create、Find、Join 或 Destroy 蓝图入口")
+		: TEXT("根据 StatusCode 修复环境后重新运行 RunProviderDiagnostics");
+	return Event;
+}
+
+bool FFU_OnlineProviderPreflightGate::Dispatch(
+	const EFU_OnlineProvider Provider,
+	const EFU_OnlineDiagnosticOperation Operation,
+	const FGuid& OperationId,
+	const FFU_OnlineProviderStatus& Status,
+	TFunctionRef<void(FFU_OnlineDiagnosticEvent)> DiagnosticSink,
+	TFunctionRef<void()> FailureContinuation)
+{
+	// 【顺序契约】无论 Ready 或 Rejected，先交给唯一诊断 sink；拒绝时才允许旧失败续步执行。
+	DiagnosticSink(FFU_OnlineSessionDiagnostics::BuildProviderPreflightDiagnostic(
+		Provider,
+		Operation,
+		OperationId,
+		Status.bIsReady,
+		Status.DiagnosticCode.ToString(),
+		Status.Message));
+	if (!Status.bIsReady)
+	{
+		FailureContinuation();
+		return false;
+	}
+	return true;
+}
+
+void FFU_OnlineSessionDiagnostics::AttachViewport(UGameViewportClient* InViewport)
+{
+	if (OverlayViewport.Get() == InViewport && OverlayWidget.IsValid())
+	{
+		return;
+	}
+
+	DetachViewport();
+	if (!Config.bEnableOverlay || InViewport == nullptr)
+	{
+		return;
+	}
+
+	OverlayViewport = InViewport;
+	OverlayWidget = SNew(SFU_OnlineDiagnosticOverlay).Model(OverlayModel);
+	// 【精确所有权】只移除本类此前 Add 的 Widget，不接管或清空项目原有的 Viewport 内容。
+	InViewport->AddViewportWidgetContent(OverlayWidget.ToSharedRef(), 10000);
+}
+
+void FFU_OnlineSessionDiagnostics::DetachViewport()
+{
+	if (OverlayViewport.IsValid() && OverlayWidget.IsValid())
+	{
+		OverlayViewport->RemoveViewportWidgetContent(OverlayWidget.ToSharedRef());
+	}
+
+	OverlayWidget.Reset();
+	OverlayViewport.Reset();
+}
+
+FString FFU_OnlineSessionDiagnostics::FormatEventForOutput(const FFU_OnlineDiagnosticEvent& Event)
+{
+	FString Output = FString::Printf(
+		TEXT("FU Diagnostic [Seq=%lld] [%s] Code=%s Operation=%s/%s Provider=%s Id=%s World=%s PIE=%d Status=%s Message=%s Cause=%s Action=%s"),
+		Event.Sequence,
+		FUOnlineSessionDiagnosticsPrivate::ToText(Event.Severity),
+		*Event.Code,
+		FUOnlineSessionDiagnosticsPrivate::ToText(Event.Operation),
+		FUOnlineSessionDiagnosticsPrivate::ToText(Event.Phase),
+		FUOnlineSessionDiagnosticsPrivate::ToText(Event.Provider),
+		*Event.OperationId.ToString(),
+		*Event.WorldName,
+		Event.PIEInstanceId,
+		*Event.Status,
+		*Event.Message,
+		*Event.Cause,
+		*Event.RecommendedAction);
+
+	if (!Event.Fields.IsEmpty())
+	{
+		Output += FString::Printf(
+			TEXT(" Fields={%s}"),
+			*FUOnlineSessionDiagnosticsPrivate::FormatFields(Event.Fields));
+	}
+
+	return Output;
+}
+
+void FFU_OnlineSessionDiagnostics::WriteToLog(const FFU_OnlineDiagnosticEvent& Event)
+{
+	const FString Message = FormatEventForOutput(Event);
+	switch (Event.Severity)
+	{
+	case EFU_OnlineDiagnosticSeverity::Verbose:
+		UE_LOG(LogFUOnlineSession, Verbose, TEXT("%s"), *Message);
+		break;
+	case EFU_OnlineDiagnosticSeverity::Info:
+		UE_LOG(LogFUOnlineSession, Log, TEXT("%s"), *Message);
+		break;
+	case EFU_OnlineDiagnosticSeverity::Warning:
+		UE_LOG(LogFUOnlineSession, Warning, TEXT("%s"), *Message);
+		break;
+	case EFU_OnlineDiagnosticSeverity::Error:
+		UE_LOG(LogFUOnlineSession, Error, TEXT("%s"), *Message);
+		break;
+	default:
+		UE_LOG(LogFUOnlineSession, Warning, TEXT("%s"), *Message);
+		break;
+	}
+}
