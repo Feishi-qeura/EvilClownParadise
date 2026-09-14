@@ -43,7 +43,7 @@ void AECPMonsterBase::SetMaxWalkSpeed(float NewSpeed)
 
 void AECPMonsterBase::PerformAttack()
 {
-	if (!HasAuthority() || !HasTarget() || IsTargetInAttackRange()){return;}
+	if (!HasAuthority() || !HasTarget() || !IsTargetInAttackRange()){ return; }
 	
 	const float now = GetWorld()->GetTimeSeconds();
 	if (now - LastAttackTime < AttackInterval){return;}
