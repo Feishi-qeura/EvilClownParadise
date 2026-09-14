@@ -23,12 +23,34 @@
 			]
 		},
 		{
-			"Name": "FUOnlineSession",
-			"Enabled": true
+			"Name": "ModelContextProtocol",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "AllToolsets",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
 		},
 		{
 			"Name": "OnlineSubsystemSteam",
 			"Name": "GameplayStateTree",
+			"Enabled": true
+		},
+		{
+			"Name": "DidItHit",
+			"Enabled": false
+		},
+		{
+			"Name": "SteamSockets",
+			"Enabled": true
+		},
+		{
+			"Name": "SocketSubsystemSteamIP",
 			"Enabled": true
 		}
 	]
