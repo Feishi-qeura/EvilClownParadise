@@ -26,5 +26,8 @@ enum class EFU_OnlineConfigResult : uint8
 class FFUOnlineSessionConfigManager final
 {
 public:
+	/** 纯策略接缝：关闭兼容开关时，任何调用者都不得触发项目文件迁移。 */
+	static bool ShouldRunLegacyMigration(bool bAutoConfigureProject);
+
     static EFU_OnlineConfigResult EnsureProjectConfiguration();
 };

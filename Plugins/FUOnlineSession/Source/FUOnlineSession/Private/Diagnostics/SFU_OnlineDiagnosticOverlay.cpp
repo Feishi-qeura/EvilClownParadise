@@ -10,6 +10,11 @@ void SFU_OnlineDiagnosticOverlay::Construct(const FArguments& InArgs)
 	Model = InArgs._Model;
 	SetCanTick(true);
 
+	// 【输入穿透】该 Viewport 浮层只负责绘制脱敏诊断，不提供任何可交互控件。
+	// HitTestInvisible 会同时排除根节点和所有 Border/Text 子节点；不能使用
+	// SelfHitTestInvisible，否则子节点仍可能抢走底层 UMG 控件的 click/hover。
+	SetVisibility(EVisibility::HitTestInvisible);
+
 	ChildSlot
 	[
 		SNew(SBox)
@@ -43,6 +48,16 @@ void SFU_OnlineDiagnosticOverlay::RefreshRows()
 	}
 
 	const TArray<FFU_OnlineDiagnosticOverlayRow> VisibleRows = Model->GetVisibleRows(FDateTime::UtcNow());
+
+	// 【视觉生命周期】最后一行过期后折叠内容容器，让快照在时限到达时真正消失；
+	// 根 Widget 仍保持 Tick，后续新诊断无需重新附着 Viewport 就能再次出现。
+	const EVisibility DesiredRowsVisibility =
+		VisibleRows.IsEmpty() ? EVisibility::Collapsed : EVisibility::HitTestInvisible;
+	if (RowsContainer->GetVisibility() != DesiredRowsVisibility)
+	{
+		RowsContainer->SetVisibility(DesiredRowsVisibility);
+	}
+
 	bool bRowsChanged = VisibleRows.Num() != LastRenderedRows.Num();
 	if (!bRowsChanged)
 	{
@@ -82,6 +97,18 @@ void SFU_OnlineDiagnosticOverlay::RefreshRows()
 
 	LastRenderedRows = VisibleRows;
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+EVisibility SFU_OnlineDiagnosticOverlay::GetRowsVisibilityForTesting() const
+{
+	return RowsContainer.IsValid() ? RowsContainer->GetVisibility() : EVisibility::Collapsed;
+}
+
+int32 SFU_OnlineDiagnosticOverlay::GetRenderedRowCountForTesting() const
+{
+	return RowsContainer.IsValid() ? RowsContainer->NumSlots() : 0;
+}
+#endif
 
 FLinearColor SFU_OnlineDiagnosticOverlay::GetSeverityColor(const EFU_OnlineDiagnosticSeverity Severity)
 {

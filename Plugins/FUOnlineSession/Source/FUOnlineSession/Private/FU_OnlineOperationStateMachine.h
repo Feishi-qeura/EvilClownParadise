@@ -94,6 +94,15 @@ public:
 	/** preflight 全部通过、即将绑定 delegate 时，才为票据分配活动 generation。 */
 	bool AcceptAttempt(FFU_OperationTicket& Ticket, EFU_OperationKind SubmittedKind);
 
+	/**
+	 * 只读判断一张尚未接收的票据是否仍有资格取得异步槽位。
+	 *
+	 * 诊断会同步公开给 Blueprint，因此 Requested/Preflight 监听器可能重入同一 Provider 的
+	 * 公共入口。重入会推进 AttemptSequence，甚至先提交另一个操作；调用者必须在写入
+	 * SessionSearch、缓存或 pending 参数前使用本判断，避免旧调用覆盖新 generation 的资源。
+	 */
+	bool CanAcceptAttempt(const FFU_OperationTicket& Ticket) const;
+
 	/** 链式预销毁成功后，保持根 OperationId 并为 Create/Join 续步分配新 generation。 */
 	bool ContinueAcceptedAttempt(EFU_OperationKind SubmittedKind);
 

@@ -1,11 +1,26 @@
 #include "FUOnlineSessionConfigManager.h"
 
 #include "FUOnlineSessionLegacyConfigMigration.h"
+#include "FU_OnlineSessionSettings.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFUOnlineSessionConfig, Log, All);
 
+bool FFUOnlineSessionConfigManager::ShouldRunLegacyMigration(const bool bAutoConfigureProject)
+{
+	// 当前配置由插件 Config 层天然启用/禁用；此开关只拥有旧受管块的一次性清理权限。
+	return bAutoConfigureProject;
+}
+
 EFU_OnlineConfigResult FFUOnlineSessionConfigManager::EnsureProjectConfiguration()
 {
+	const UFU_OnlineSessionSettings* const Settings = GetDefault<UFU_OnlineSessionSettings>();
+	if (!Settings || !ShouldRunLegacyMigration(Settings->bAutoConfigureProject))
+	{
+		// 【用户所有权】开关关闭时不读取、更不改写 DefaultEngine.ini；插件层本身仍正常生效。
+		UE_LOG(LogFUOnlineSessionConfig, Log, TEXT("已关闭 FU 历史配置迁移；项目 DefaultEngine.ini 保持不变"));
+		return EFU_OnlineConfigResult::Unchanged;
+	}
+
 	// 【兼容入口】保留旧私有入口给既有 Editor 调用者；新语义只执行一次遗留块清理，不读取 Settings 生成新配置。
 	FFU_LegacyMigrationArtifacts Artifacts;
 	const EFU_LegacyMigrationResult MigrationResult =

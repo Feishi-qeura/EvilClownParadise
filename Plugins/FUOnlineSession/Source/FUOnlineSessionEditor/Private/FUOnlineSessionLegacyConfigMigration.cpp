@@ -278,6 +278,12 @@ EFU_LegacyMigrationResult FFU_LegacyConfigMigration::MigrateProjectDefaultEngine
 #else
 	const FString TargetPath = FPaths::ConvertRelativePathToFull(
 		FPaths::Combine(FPaths::ProjectConfigDir(), TEXT("DefaultEngine.ini")));
+	if (!IFileManager::Get().FileExists(*TargetPath))
+	{
+		// 【极简项目】没有 DefaultEngine.ini 等价于没有历史受管块；不得制造空项目文件或报 IO 错误。
+		return EFU_LegacyMigrationResult::NoManagedBlock;
+	}
+
 	TArray<uint8> OriginalBytes;
 	if (!FFileHelper::LoadFileToArray(OriginalBytes, *TargetPath))
 	{

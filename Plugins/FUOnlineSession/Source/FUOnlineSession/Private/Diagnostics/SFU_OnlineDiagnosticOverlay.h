@@ -22,6 +22,12 @@ public:
 	void Construct(const FArguments& InArgs);
 	virtual void Tick(const FGeometry& AllottedGeometry, double InCurrentTime, float InDeltaTime) override;
 
+#if WITH_DEV_AUTOMATION_TESTS
+	/** 仅供无窗口自动化锁定“空内容折叠、后续事件重新显示”的 Slate 生命周期契约。 */
+	EVisibility GetRowsVisibilityForTesting() const;
+	int32 GetRenderedRowCountForTesting() const;
+#endif
+
 private:
 	void RefreshRows();
 	static FLinearColor GetSeverityColor(EFU_OnlineDiagnosticSeverity Severity);

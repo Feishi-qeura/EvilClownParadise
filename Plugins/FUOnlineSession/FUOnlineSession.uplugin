@@ -1,12 +1,12 @@
 {
 	"FileVersion": 3,
-	"Version": 2,
-	"VersionName": "2.0",
+	"Version": 4,
+	"VersionName": "2.1.1",
 	"EngineVersion": "5.8.0",
 	"FriendlyName": "FU Online Session",
 	"Description": "支持Steam大厅及NULL LAN会话",
 	"Category": "Networking",
-	"CanContainContent": false,
+	"CanContainContent": true,
 	"SupportedTargetPlatforms": [
 		"Win64"
 	],

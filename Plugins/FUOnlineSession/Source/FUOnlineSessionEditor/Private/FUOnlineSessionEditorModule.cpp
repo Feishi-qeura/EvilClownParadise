@@ -70,6 +70,14 @@ void FFUOnlineSessionEditorModule::HandleSettingsChanged(
 	const FName PropertyName =
 		PropertyChangedEvent.GetPropertyName();
 
+	// 用户在设置面板显式打开兼容迁移时应当立即执行一次；关闭开关绝不回写项目配置。
+	// 当前网络配置始终来自插件 Config 层，所以此分支只处理旧版本留下的成对标记块。
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(UFU_OnlineSessionSettings, bAutoConfigureProject)
+		&& Settings->bAutoConfigureProject)
+	{
+		FFUOnlineSessionConfigManager::EnsureProjectConfiguration();
+	}
+
 	UE_LOG(
 		LogFUOnlineSessionEditor,
 		Log,
@@ -77,7 +85,8 @@ void FFUOnlineSessionEditorModule::HandleSettingsChanged(
 		PropertyName.IsNone() ? TEXT("Unknown") : *PropertyName.ToString()
 	);
 
-	// 【设置变更】只保存插件自身配置并提示重启；禁止在此路径重跑迁移或写 DefaultEngine.ini。
+	// 【设置变更】普通字段只保存插件配置并提示重启；唯一例外是上面用户显式
+	// 将 bAutoConfigureProject 切换为 true 时，允许重跑一次“只删除 FU 旧标记块”的兼容迁移。
 	UE_LOG(
 		LogFUOnlineSessionEditor,
 		Log,

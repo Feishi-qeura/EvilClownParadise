@@ -14,7 +14,8 @@ struct FFU_OnlineDiagnosticDispatchConfig
 	bool bEmitToLog = true;
 	bool bEnableOverlay = true;
 	EFU_OnlineDiagnosticSeverity MinimumOverlaySeverity = EFU_OnlineDiagnosticSeverity::Warning;
-	float OverlayDurationSeconds = 8.0f;
+	// 默认三秒足够阅读一条快照，同时不会让调试信息长时间占据游戏画面。
+	float OverlayDurationSeconds = 3.0f;
 	int32 OverlayRowLimit = 6;
 };
 
@@ -61,14 +62,17 @@ public:
 	using FReportWriter = TFunction<bool(const FString& Contents, const FString& Destination, FString& OutRawFailureDetail)>;
 	/** 已脱敏事件的日志出口；默认 WriteToLog，测试可捕获完整格式行而不写 UE_LOG。 */
 	using FLogSink = TFunction<void(const FFU_OnlineDiagnosticEvent& Event, const FString& FormattedLine)>;
+	/** 只接收脱敏文本及内部固定路径；默认追加 UTF-8，测试可在磁盘边界模拟权限/空间故障。 */
+	using FProviderLogWriter = TFunction<bool(const FString& Contents, const FString& Destination)>;
 
 	explicit FFU_OnlineSessionDiagnostics(
 		const FFU_OnlineDiagnosticDispatchConfig& InConfig,
 		TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast,
 		FReportWriter InReportWriter = FReportWriter(),
-		FLogSink InLogSink = FLogSink());
+		FLogSink InLogSink = FLogSink(),
+		FProviderLogWriter InProviderLogWriter = FProviderLogWriter());
 
-	/** 统一执行脱敏 -> 有界历史 -> UE_LOG -> Slate 浮层 -> Blueprint 广播。 */
+	/** 统一脱敏后分发到有界历史、UE_LOG、Provider 文件、Slate 浮层和 Blueprint。 */
 	FFU_OnlineDiagnosticEvent Emit(const FFU_OnlineDiagnosticEvent& CandidateEvent);
 
 	/** 返回副本，防止 Blueprint 或调用方修改内部历史。 */
@@ -80,9 +84,12 @@ public:
 
 	/**
 	 * 仅允许导出到 Project/Saved/Logs/FUOnlineSession；调用方不能指定任意路径。
-	 * 保存失败只通过返回值和 OutError 报告，绝不递归产生新的保存诊断事件。
+	 * 保存失败返回安全 OutError，并分发失败诊断；不递归调用 SaveReport。
 	 */
 	bool SaveReport(FString& OutSavedPath, FString& OutError);
+
+	/** 当前实例的自动日志绝对路径；查询不创建文件，非法 Provider 返回空串。 */
+	FString GetProviderLogPath(EFU_OnlineProvider Provider) const;
 
 	/** 可独立测试的统一脱敏入口，保证所有输出使用同一套规则。 */
 	static FFU_OnlineDiagnosticEvent Sanitize(const FFU_OnlineDiagnosticEvent& CandidateEvent);
@@ -121,6 +128,12 @@ private:
 	TFunction<void(const FFU_OnlineDiagnosticEvent&)> BlueprintBroadcast;
 	FReportWriter ReportWriter;
 	FLogSink LogSink;
+	FProviderLogWriter ProviderLogWriter;
+	// 每个 GameInstance 的唯一文件名，既隔离多进程，也隔离同进程的多个 PIE 实例。
+	FString ProviderLogRoot;
+	FString ProviderLogFilename;
+	// 磁盘故障按 Provider 熔断，避免每条事件都触发失败、反复 IO 或递归诊断。
+	TSet<EFU_OnlineProvider> FailedFileProviders;
 	TSharedRef<FFU_OnlineDiagnosticOverlayModel> OverlayModel;
 	TWeakObjectPtr<UGameViewportClient> OverlayViewport;
 	TSharedPtr<SFU_OnlineDiagnosticOverlay> OverlayWidget;

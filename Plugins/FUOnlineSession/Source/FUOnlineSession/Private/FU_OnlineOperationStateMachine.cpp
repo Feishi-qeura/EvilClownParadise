@@ -17,11 +17,7 @@ bool FFU_OnlineOperationStateMachine::AcceptAttempt(
 {
 	// Ticket 必须属于本机最新公开尝试且槽位为空；拒绝路径严格只返回 false，
 	// 防止错误调用在这里重置上一请求的 generation、timer 对应状态或 exactly-once 标记。
-	if (State.Phase != EFU_OperationPhase::Idle
-		|| Ticket.bAccepted
-		|| Ticket.AttemptSequence == 0
-		|| Ticket.AttemptSequence != State.AttemptSequence
-		|| !Ticket.OperationId.IsValid())
+	if (!CanAcceptAttempt(Ticket))
 	{
 		return false;
 	}
@@ -39,6 +35,17 @@ bool FFU_OnlineOperationStateMachine::AcceptAttempt(
 	State.RecoveryDestroyAttempts = 0;
 	State.bOriginalCallbackSeen = false;
 	return true;
+}
+
+bool FFU_OnlineOperationStateMachine::CanAcceptAttempt(const FFU_OperationTicket& Ticket) const
+{
+	// 【诊断重入门】保持与 AcceptAttempt 完全相同的资格条件，但绝不改变 generation。
+	// 这样 Subsystem 可以在任何共享资源写入前预判票据是否已被同步 Blueprint 回调取代。
+	return State.Phase == EFU_OperationPhase::Idle
+		&& !Ticket.bAccepted
+		&& Ticket.AttemptSequence != 0
+		&& Ticket.AttemptSequence == State.AttemptSequence
+		&& Ticket.OperationId.IsValid();
 }
 
 bool FFU_OnlineOperationStateMachine::ContinueAcceptedAttempt(const EFU_OperationKind SubmittedKind)

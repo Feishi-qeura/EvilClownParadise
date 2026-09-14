@@ -20,12 +20,12 @@ public:
     virtual FName GetCategoryName() const override;
 
     /**
-     * 保留旧属性以兼容已有项目设置。
+     * 是否允许 Editor 一次性清理旧版本写入 DefaultEngine.ini 的 FU 成对标记块。
      *
-     * 它不再写入 DefaultEngine.ini；关闭后只会停止旧 Editor 自动配置流程，
-     * Session 的插件自有配置和运行时功能不受影响。
+     * 当前版本不再向项目文件生成配置；关闭此项后迁移器不会读取或改写项目文件，
+     * Session 的插件自有 Config 层和运行时功能不受影响。
      */
-    UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Online Session|Steam|Automatic Configuration")
+	UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Online Session|Steam|Legacy Migration")
     bool bAutoConfigureProject = true;
 
     /**
@@ -51,7 +51,7 @@ public:
     UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Diagnostics",meta = (ClampMin = "1", ClampMax = "1000", UIMin = "1", UIMax = "1000"))
     int32 DiagnosticHistoryLimit = 200;
 
-    /** 是否记录运行时诊断日志。 */
+    /** 同时控制 UE_LOG 与 Saved/Logs/FUOnlineSession/OnlineSubsystemLog 下的 Provider 自动文件；不影响历史和 Blueprint。 */
     UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Diagnostics")
     bool bEnableDiagnosticLog = true;
 
@@ -60,15 +60,15 @@ public:
     bool bEnableDiagnosticOverlay = true;
 
     /**
-     * Task 4 才会提供公共诊断严重级别枚举；当前用稳定 byte 保持配置兼容。
+     * 配置继续使用已发布的稳定 byte 契约，避免公开枚举加入 Verbose 后让旧 ini 数值改义。
      * 约定 0=Info、1=Warning、2=Error，默认 Warning。
      */
     UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Diagnostics",meta = (ClampMin = "0", ClampMax = "2", UIMin = "0", UIMax = "2"))
     uint8 MinimumOverlaySeverity = 1;
 
-    /** 单条诊断浮层的显示时长。 */
+    /** 单条诊断浮层的显示时长；默认三秒后自动消失，且浮层始终不参与鼠标命中。 */
     UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Diagnostics",meta = (ClampMin = "1.0", ClampMax = "60.0", UIMin = "1.0", UIMax = "60.0"))
-    float OverlayDurationSeconds = 8.0f;
+    float OverlayDurationSeconds = 3.0f;
 
     /** 同时显示的诊断浮层行数。 */
     UPROPERTY(Config,EditAnywhere,Category = "FUOnlineSession|Diagnostics",meta = (ClampMin = "1", ClampMax = "20", UIMin = "1", UIMax = "20"))

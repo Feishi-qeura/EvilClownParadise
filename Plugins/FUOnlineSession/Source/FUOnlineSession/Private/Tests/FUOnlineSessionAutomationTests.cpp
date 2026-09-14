@@ -6,7 +6,9 @@
 #include "FU_OnlineSessionTypes.h"
 #include "FU_OnlineDiagnosticTypes.h"
 #include "Diagnostics/FU_OnlineSessionDiagnostics.h"
+#include "Diagnostics/SFU_OnlineDiagnosticOverlay.h"
 #include "FU_OnlineSessionRequestValidation.h"
+#include "FU_OnlineSessionSettings.h"
 #include "FU_OnlineOperationStateMachine.h"
 #include "FU_OnlineProviderStatusEvaluator.h"
 #include "FU_SteamAppIdBootstrap.h"
@@ -526,7 +528,9 @@ bool FFUOnlineSessionOperationStateMachineTest::RunTest(const FString& Parameter
 	// 但不能覆盖第一条已提交请求的 generation、根操作、当前 OSS 操作或完成标记。
 	FFU_OnlineOperationStateMachine BusyMachine;
 	FFU_OperationTicket First = BusyMachine.BeginAttempt(EFU_OperationKind::Create);
+	TestTrue(TEXT("最新且 Idle 的 preflight 票据可安全写入共享状态"), BusyMachine.CanAcceptAttempt(First));
 	TestTrue(TEXT("首次 Create 可以在 preflight 后被接收"), BusyMachine.AcceptAttempt(First, EFU_OperationKind::Create));
+	TestFalse(TEXT("已接收票据不能再次取得槽位"), BusyMachine.CanAcceptAttempt(First));
 	const FFU_OperationState ActiveBeforeBusy = BusyMachine.Get();
 	const FFU_OperationTicket Rejected = BusyMachine.RecordRejectedAttempt(EFU_OperationKind::Join);
 	TestFalse(TEXT("Busy 尝试没有被接收"), Rejected.bAccepted);
@@ -538,6 +542,17 @@ bool FFUOnlineSessionOperationStateMachineTest::RunTest(const FString& Parameter
 	TestEqual(TEXT("Busy reject preserves submitted kind"), BusyMachine.Get().ActiveKind, EFU_OperationKind::Create);
 	TestEqual(TEXT("Busy reject preserves phase"), BusyMachine.Get().Phase, EFU_OperationPhase::Submitted);
 	TestEqual(TEXT("Busy reject preserves completion flag"), BusyMachine.Get().bCompletionBroadcast, ActiveBeforeBusy.bCompletionBroadcast);
+	TestFalse(TEXT("Busy 中的新票据不能写入共享状态"), BusyMachine.CanAcceptAttempt(Rejected));
+
+	// 【回归：Requested/Ready Blueprint 重入】外层票据尚未接收时，内层公开调用会推进尝试序号。
+	// 即使内层随后也没有提交 OSS，旧票据仍必须永久失效，避免它恢复后覆盖较新的 UI/缓存意图。
+	FFU_OnlineOperationStateMachine PreflightReentryMachine;
+	FFU_OperationTicket OuterFind = PreflightReentryMachine.BeginAttempt(EFU_OperationKind::Find);
+	TestTrue(TEXT("重入前外层 Find 仍可接收"), PreflightReentryMachine.CanAcceptAttempt(OuterFind));
+	const FFU_OperationTicket InnerFind = PreflightReentryMachine.BeginAttempt(EFU_OperationKind::Find);
+	TestFalse(TEXT("较新公开尝试使外层票据失效"), PreflightReentryMachine.CanAcceptAttempt(OuterFind));
+	TestTrue(TEXT("未提交的内层票据成为唯一可接收票据"), PreflightReentryMachine.CanAcceptAttempt(InnerFind));
+	TestFalse(TEXT("状态机拒绝接收已被重入取代的外层票据"), PreflightReentryMachine.AcceptAttempt(OuterFind, EFU_OperationKind::Find));
 
 	// 【回归：NoSession 不是 Create 已终止的证据】超时只广播一次失败并保留原始 delegate；
 	// 在原回调真正到达前，即使 GetNamedSession 暂时为空也不能回到 Idle。
@@ -629,6 +644,68 @@ bool FFUOnlineSessionOperationStateMachineTest::RunTest(const FString& Parameter
 	TestEqual(
 		TEXT("同步拒绝重复处理不广播也不清新资源"),
 		SynchronousRejectMachine.HandleSynchronousReject(RejectedCreate.Generation),
+		EFU_OperationAction::None);
+
+	// 【回归：Steam fallback 同步终态 exactly-once】Provider 可在 FindSessions 调用栈内
+	// 完成第二遍。内层回调已消费 generation 后，外层只能识别为状态已推进，
+	// 不得再走同步拒绝或第二次广播。
+	FFU_OnlineOperationStateMachine FallbackSyncCompleteMachine;
+	const FFU_OperationTicket FallbackSyncComplete =
+		FallbackSyncCompleteMachine.BeginAcceptedAttempt(EFU_OperationKind::Find);
+	const EFU_OperationAction FallbackCompleted =
+		FallbackSyncCompleteMachine.HandleOriginalCompletion(
+			FallbackSyncComplete.Generation,
+			EFU_OperationKind::Find,
+			true,
+			false);
+	const TSharedPtr<FOnlineSessionSearch> CompletedFallbackSearch = MakeShared<FOnlineSessionSearch>();
+	CompletedFallbackSearch->SearchState = EOnlineAsyncTaskState::Done;
+	TestEqual(
+		TEXT("第二遍同步回调完成后外层只识别为已推进"),
+		FUOnlineSessionProviderTraitsPrivate::ClassifySearchPostSubmit(
+			FallbackSyncCompleteMachine.IsExpectedCallback(
+				FallbackSyncComplete.Generation,
+				EFU_OperationKind::Find),
+			false,
+			true,
+			CompletedFallbackSearch,
+			TSharedPtr<FOnlineSessionSearch>()),
+		FUOnlineSessionProviderTraitsPrivate::EFU_SearchPostSubmitDisposition::CallbackAlreadyAdvancedState);
+	TestTrue(TEXT("第二遍第一个完成清理本次 watchdog"), EnumHasAnyFlags(FallbackCompleted, EFU_OperationAction::ClearWatchdog));
+	TestTrue(TEXT("第二遍第一个完成将根请求标记为已交付"), FallbackSyncCompleteMachine.Get().bCompletionBroadcast);
+	TestEqual(
+		TEXT("第二遍同步完成后重复回调为 no-op"),
+		FallbackSyncCompleteMachine.HandleOriginalCompletion(
+			FallbackSyncComplete.Generation,
+			EFU_OperationKind::Find,
+			true,
+			false),
+		EFU_OperationAction::None);
+
+	// Provider 拒绝 fallback 时没有内层回调，外层则必须精确消费一次 generation；
+	// 第二次同样的拒绝不能再清理或广播。
+	FFU_OnlineOperationStateMachine FallbackSyncRejectMachine;
+	const FFU_OperationTicket FallbackSyncReject =
+		FallbackSyncRejectMachine.BeginAcceptedAttempt(EFU_OperationKind::Find);
+	const TSharedPtr<FOnlineSessionSearch> RejectedFallbackSearch = MakeShared<FOnlineSessionSearch>();
+	TestEqual(
+		TEXT("fallback 未进入 InProgress 时分类为同步拒绝"),
+		FUOnlineSessionProviderTraitsPrivate::ClassifySearchPostSubmit(
+			FallbackSyncRejectMachine.IsExpectedCallback(
+				FallbackSyncReject.Generation,
+				EFU_OperationKind::Find),
+			true,
+			false,
+			RejectedFallbackSearch,
+			RejectedFallbackSearch),
+		FUOnlineSessionProviderTraitsPrivate::EFU_SearchPostSubmitDisposition::SynchronousReject);
+	const EFU_OperationAction FallbackRejected =
+		FallbackSyncRejectMachine.HandleSynchronousReject(FallbackSyncReject.Generation);
+	TestTrue(TEXT("fallback 同步拒绝只请求一次失败广播"), EnumHasAnyFlags(FallbackRejected, EFU_OperationAction::BroadcastFailure));
+	TestEqual(TEXT("fallback 同步拒绝后回到 Idle"), FallbackSyncRejectMachine.Get().Phase, EFU_OperationPhase::Idle);
+	TestEqual(
+		TEXT("fallback 重复同步拒绝为 no-op"),
+		FallbackSyncRejectMachine.HandleSynchronousReject(FallbackSyncReject.Generation),
 		EFU_OperationAction::None);
 
 	// 【Fix round 1 RED：Find cancel 三方竞态】成功 cancel、失败 cancel、原 Find 先完成分别拥有
@@ -1179,6 +1256,35 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FFUOnlineSessionDiagnosticOverlayModelTest::RunTest(const FString& Parameters)
 {
+	// 【回归：运行时默认可读时长】RunProviderDiagnostics 会一次产生多条快照，默认值必须与
+	// 插件 DefaultFUOnlineSession.ini 同为 3 秒，避免新项目启用插件后仍继承旧的 8 秒遮挡体验。
+	const FFU_OnlineDiagnosticDispatchConfig DefaultDispatchConfig;
+	TestEqual(
+		TEXT("诊断分发器默认显示时长为 3 秒"),
+		DefaultDispatchConfig.OverlayDurationSeconds,
+		3.0f);
+	TestEqual(
+		TEXT("插件配置默认显示时长为 3 秒"),
+		GetDefault<UFU_OnlineSessionSettings>()->OverlayDurationSeconds,
+		3.0f);
+	FFU_OnlineDiagnosticOverlayModel DefaultDurationModel;
+	FFU_OnlineDiagnosticEvent DefaultDurationWarning;
+	DefaultDurationWarning.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+	DefaultDurationWarning.Code = TEXT("FU.Test.DefaultDuration");
+	DefaultDurationWarning.Message = TEXT("Three second boundary");
+	const FDateTime DefaultDurationStart(2026, 9, 11, 11, 59, 50);
+	DefaultDurationModel.Add(DefaultDurationWarning, DefaultDispatchConfig, DefaultDurationStart);
+	TestEqual(
+		TEXT("默认诊断在三秒前仍然可见"),
+		DefaultDurationModel.GetVisibleRows(
+			DefaultDurationStart + FTimespan::FromMilliseconds(2999.0)).Num(),
+		1);
+	TestEqual(
+		TEXT("默认诊断在三秒整立即消失"),
+		DefaultDurationModel.GetVisibleRows(
+			DefaultDurationStart + FTimespan::FromSeconds(3.0)).Num(),
+		0);
+
 	// 【模型测试】不创建真实 Viewport，证明无窗口/Commandlet 情况下浮层只是缺席的输出通道，
 	// 而不是让诊断分发器失效；纯模型也使严重级别和过期逻辑可稳定地自动化验证。
 	FFU_OnlineDiagnosticDispatchConfig Config;
@@ -1208,6 +1314,31 @@ bool FFUOnlineSessionDiagnosticOverlayModelTest::RunTest(const FString& Paramete
 		TEXT("过期浮层行自动隐藏"),
 		OverlayModel.GetVisibleRows(NowUtc + FTimespan::FromSeconds(2.0)).Num(),
 		0);
+
+	// 【回归：输入穿透】诊断层会作为全屏 Viewport Widget 长驻，以便未来诊断还能再次显示；
+	// 根 Slate Widget 必须 HitTestInvisible，才能让鼠标点击与 hover 始终命中下面的 UMG 控件。
+	const TSharedRef<FFU_OnlineDiagnosticOverlayModel> WidgetModel =
+		MakeShared<FFU_OnlineDiagnosticOverlayModel>();
+	const TSharedRef<SFU_OnlineDiagnosticOverlay> OverlayWidget =
+		SNew(SFU_OnlineDiagnosticOverlay)
+		.Model(WidgetModel);
+	const EVisibility OverlayVisibility = OverlayWidget->GetVisibility();
+	TestTrue(TEXT("诊断浮层仍可绘制"), OverlayVisibility.IsVisible());
+	TestFalse(TEXT("诊断根节点不得命中鼠标"), OverlayVisibility.IsHitTestVisible());
+	TestFalse(TEXT("诊断子节点不得命中鼠标"), OverlayVisibility.AreChildrenHitTestVisible());
+	TestEqual(TEXT("空诊断内容初始折叠"), OverlayWidget->GetRowsVisibilityForTesting(), EVisibility::Collapsed);
+	TestEqual(TEXT("空诊断内容没有 Slate 行"), OverlayWidget->GetRenderedRowCountForTesting(), 0);
+
+	// 【回归：折叠后重新出现】根 Widget 一直 Tick；同一个 Model 后续加入 Warning 后，
+	// 下一帧必须恢复绘制一行，同时内容容器仍保持 HitTestInvisible。
+	FFU_OnlineDiagnosticEvent LaterWarning;
+	LaterWarning.Severity = EFU_OnlineDiagnosticSeverity::Warning;
+	LaterWarning.Code = TEXT("FU.Test.LaterWarning");
+	LaterWarning.Message = TEXT("A later diagnostic must wake the rows container");
+	WidgetModel->Add(LaterWarning, DefaultDispatchConfig, FDateTime::UtcNow());
+	OverlayWidget->Tick(FGeometry(), 0.0, 0.0f);
+	TestEqual(TEXT("后续诊断重新显示内容容器"), OverlayWidget->GetRowsVisibilityForTesting(), EVisibility::HitTestInvisible);
+	TestEqual(TEXT("后续诊断重新生成一条 Slate 行"), OverlayWidget->GetRenderedRowCountForTesting(), 1);
 	return true;
 }
 
@@ -1370,6 +1501,174 @@ bool FFUOnlineSessionSteamLobbyProjectIsolationTest::RunTest(const FString& Para
 		SteamSearch.QuerySettings.GetComparisonOp(SEARCH_KEYWORDS),
 		EOnlineComparisonOp::Equals);
 
+	// 【真实双机日志回归】主机已经创建公开 Lobby，但客户端第一遍精确关键字查询在 Steam OSS
+	// 边界返回 Raw=0。第二遍不能继续携带同一可疑条件：有房间名时只查已有房间键，
+	// 无名浏览时才查备用 int32 项目协议哈希。完整字符串仍在本地复核，避免共享 AppID 泄露结果。
+	FOnlineSessionSearch NamedFallbackSearch;
+	TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ConfigureFallbackSearch(
+		NamedFallbackSearch,
+		TEXT("111"));
+	bool bSearchLobbies = false;
+	TestTrue(
+		TEXT("Steam 降级搜索仍必须查询 Lobby"),
+		NamedFallbackSearch.QuerySettings.Get(SEARCH_LOBBIES, bSearchLobbies) && bSearchLobbies);
+	FString UnexpectedFallbackKeyword;
+	TestFalse(
+		TEXT("Steam 降级搜索必须移除第一遍项目关键字条件"),
+		NamedFallbackSearch.QuerySettings.Get(SEARCH_KEYWORDS, UnexpectedFallbackKeyword));
+	const FName ProjectProtocolHashSetting(TEXT("FU_ProjectProtocolHash"));
+	int32 CreatedProjectProtocolHash = 0;
+	int32 RequestedProjectProtocolHash = 0;
+	TestTrue(
+		TEXT("Steam 创建设置必须发布备用数值协议标识"),
+		SteamCreateSettings.Get(ProjectProtocolHashSetting, CreatedProjectProtocolHash));
+	TestFalse(
+		TEXT("指定房间名时必须使用独立房间键路径，不得再叠加协议哈希"),
+		NamedFallbackSearch.QuerySettings.Get(ProjectProtocolHashSetting, RequestedProjectProtocolHash));
+	const FOnlineSessionSetting* const AdvertisedProtocolHash =
+		SteamCreateSettings.Settings.Find(ProjectProtocolHashSetting);
+	TestTrue(
+		TEXT("备用数值协议标识必须发布到在线服务"),
+		AdvertisedProtocolHash
+			&& AdvertisedProtocolHash->AdvertisementType == EOnlineDataAdvertisementType::ViaOnlineService);
+	FString FallbackRoomName;
+	TestTrue(
+		TEXT("指定房间名时降级搜索应在 Steam 后端按房间名限流"),
+		NamedFallbackSearch.QuerySettings.Get(FUOnlineSession::RoomNameSetting, FallbackRoomName));
+	TestEqual(TEXT("降级搜索房间名保持不变"), FallbackRoomName, FString(TEXT("111")));
+
+	FOnlineSessionSearch BroadFallbackSearch;
+	TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ConfigureFallbackSearch(
+		BroadFallbackSearch,
+		FString());
+	FString UnexpectedBroadRoomName;
+	TestFalse(
+		TEXT("未指定房间名时降级搜索不得提交空字符串条件"),
+		BroadFallbackSearch.QuerySettings.Get(FUOnlineSession::RoomNameSetting, UnexpectedBroadRoomName));
+	int32 BroadProjectProtocolHash = 0;
+	TestTrue(
+		TEXT("未指定房间名时仍须在 Steam 后端按备用项目协议限流"),
+		BroadFallbackSearch.QuerySettings.Get(ProjectProtocolHashSetting, BroadProjectProtocolHash));
+	TestEqual(
+		TEXT("创建与无名降级搜索的数值协议标识必须一致"),
+		BroadProjectProtocolHash,
+		CreatedProjectProtocolHash);
+	TestEqual(
+		TEXT("备用数值协议标识必须执行精确匹配"),
+		BroadFallbackSearch.QuerySettings.GetComparisonOp(ProjectProtocolHashSetting),
+		EOnlineComparisonOp::Equals);
+
+	// 接口级 Find 委托不携带 Search 身份；指针与终态双门可以拦截旧全局广播误投新委托。
+	const TSharedPtr<FOnlineSessionSearch> ExpectedSearch = MakeShared<FOnlineSessionSearch>();
+	const TSharedPtr<FOnlineSessionSearch> OtherSearch = MakeShared<FOnlineSessionSearch>();
+	TestFalse(
+		TEXT("尚未进入终态的 Search 不能消费完成广播"),
+		FUOnlineSessionProviderTraitsPrivate::IsExpectedSearchCompletion(ExpectedSearch, ExpectedSearch));
+	ExpectedSearch->SearchState = EOnlineAsyncTaskState::Done;
+	TestTrue(
+		TEXT("同一指针且 Done 才能消费成功完成广播"),
+		FUOnlineSessionProviderTraitsPrivate::IsExpectedSearchCompletion(ExpectedSearch, ExpectedSearch));
+	TestFalse(
+		TEXT("不同 Search 指针即使 Done 也不能消费迟到广播"),
+		FUOnlineSessionProviderTraitsPrivate::IsExpectedSearchCompletion(ExpectedSearch, OtherSearch));
+	OtherSearch->SearchState = EOnlineAsyncTaskState::Failed;
+	TestFalse(
+		TEXT("Provider 返回 true 但 Search 未进入 InProgress 仍视为未提交"),
+		FUOnlineSessionProviderTraitsPrivate::DidSearchRequestEnterProgress(true, OtherSearch));
+	OtherSearch->SearchState = EOnlineAsyncTaskState::InProgress;
+	TestTrue(
+		TEXT("返回 true 且 Search 进入 InProgress 才算真正提交"),
+		FUOnlineSessionProviderTraitsPrivate::DidSearchRequestEnterProgress(true, OtherSearch));
+	TestFalse(
+		TEXT("Provider 返回 false 时不能视为提交"),
+		FUOnlineSessionProviderTraitsPrivate::DidSearchRequestEnterProgress(false, OtherSearch));
+
+	// 【回归：同步 primary -> fallback 换代】第一遍回调可在 FindSessions 尚未返回时
+	// 替换 CurrentSearch 并让第二遍进入 InProgress。旧栈帧必须识别“状态已推进”，
+	// 而不能根据 primary 已 Done 就误走同步拒绝。
+	const TSharedPtr<FOnlineSessionSearch> PrimarySearch = MakeShared<FOnlineSessionSearch>();
+	PrimarySearch->SearchState = EOnlineAsyncTaskState::Done;
+	const TSharedPtr<FOnlineSessionSearch> FallbackSearch = MakeShared<FOnlineSessionSearch>();
+	FallbackSearch->SearchState = EOnlineAsyncTaskState::InProgress;
+	TestEqual(
+		TEXT("primary 同步换成 fallback 后外层不得拒绝新搜索"),
+		FUOnlineSessionProviderTraitsPrivate::ClassifySearchPostSubmit(
+			true,
+			false,
+			true,
+			PrimarySearch,
+			FallbackSearch),
+		FUOnlineSessionProviderTraitsPrivate::EFU_SearchPostSubmitDisposition::CallbackAlreadyAdvancedState);
+	TestEqual(
+		TEXT("正常 InProgress 搜索继续等待回调"),
+		FUOnlineSessionProviderTraitsPrivate::ClassifySearchPostSubmit(
+			true,
+			true,
+			true,
+			FallbackSearch,
+			FallbackSearch),
+		FUOnlineSessionProviderTraitsPrivate::EFU_SearchPostSubmitDisposition::AwaitCallback);
+	// 使用本函数内的独立 NotStarted 对象，避免与状态机测试共享任何隐式状态。
+	const TSharedPtr<FOnlineSessionSearch> NotStartedSearch = MakeShared<FOnlineSessionSearch>();
+	TestEqual(
+		TEXT("Provider 返回 true 但 Search 未进入 InProgress 仍是同步拒绝"),
+		FUOnlineSessionProviderTraitsPrivate::ClassifySearchPostSubmit(
+			true,
+			true,
+			true,
+			NotStartedSearch,
+			NotStartedSearch),
+		FUOnlineSessionProviderTraitsPrivate::EFU_SearchPostSubmitDisposition::SynchronousReject);
+
+	// 降级搜索可能收到共享 AppID 的其他项目，最终暴露给 Blueprint 前必须再次核对项目标识。
+	TestTrue(
+		TEXT("当前项目创建设置可通过本地项目校验"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::IsCurrentProjectSession(SteamCreateSettings));
+	FOnlineSessionSettings ForeignProjectSettings;
+	ForeignProjectSettings.Set(
+		SEARCH_KEYWORDS,
+		FString(TEXT("FUOnlineSession_OtherProject_V1")),
+		EOnlineDataAdvertisementType::ViaOnlineService);
+	TestFalse(
+		TEXT("其他项目 Lobby 必须被本地项目校验拒绝"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::IsCurrentProjectSession(ForeignProjectSettings));
+	TestFalse(
+		TEXT("缺少项目标识的共享 AppID Lobby 必须被拒绝"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::IsCurrentProjectSession(FOnlineSessionSettings()));
+
+	// 空密码是公开房间，不应向 Steam 发布无法持久化的空字符串；非空密码仍保留原协议。
+	FOnlineSessionSettings PublicRoomMetadata;
+	FUOnlineSessionProviderTraitsPrivate::ConfigureRoomMetadata(PublicRoomMetadata, TEXT("111"), FString());
+	FString PublicRoomName;
+	FString UnexpectedEmptyPassword;
+	TestTrue(
+		TEXT("公开房间仍必须发布房间名"),
+		PublicRoomMetadata.Get(FUOnlineSession::RoomNameSetting, PublicRoomName));
+	TestFalse(
+		TEXT("公开房间不得发布空密码元数据"),
+		PublicRoomMetadata.Get(FUOnlineSession::RoomPasswordSetting, UnexpectedEmptyPassword));
+	FOnlineSessionSettings ProtectedRoomMetadata;
+	FUOnlineSessionProviderTraitsPrivate::ConfigureRoomMetadata(ProtectedRoomMetadata, TEXT("111"), TEXT("secret"));
+	FString AdvertisedPassword;
+	TestTrue(
+		TEXT("受密码保护房间继续发布非空密码元数据"),
+		ProtectedRoomMetadata.Get(FUOnlineSession::RoomPasswordSetting, AdvertisedPassword));
+	TestEqual(TEXT("非空密码值保持原样"), AdvertisedPassword, FString(TEXT("secret")));
+
+	// 仅“Steam 回调成功、原始结果为 0、且尚未降级”才能再发一遍，防止失败重试和无限循环。
+	TestTrue(
+		TEXT("Steam 成功零结果应启动一次降级搜索"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ShouldStartFallbackSearch(true, 0, false));
+	TestFalse(
+		TEXT("已有结果时不应降级"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ShouldStartFallbackSearch(true, 1, false));
+	TestFalse(
+		TEXT("Provider 失败时不应把故障掩盖成第二次搜索"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ShouldStartFallbackSearch(false, 0, false));
+	TestFalse(
+		TEXT("降级只允许执行一次"),
+		TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Steam>::ShouldStartFallbackSearch(true, 0, true));
+
 	// NULL/LAN 使用 UDP 广播发现，不经过 Steam Lobby 后端。
 	// 如果把 Steam 专用过滤条件误加到 LAN，会把两种 Provider 再次耦合起来。
 	FOnlineSessionSettings LanCreateSettings;
@@ -1378,12 +1677,19 @@ bool FFUOnlineSessionSteamLobbyProjectIsolationTest::RunTest(const FString& Para
 	TestFalse(
 		TEXT("LAN 创建设置不应发布 Steam Lobby 项目标识"),
 		LanCreateSettings.Get(SEARCH_KEYWORDS, UnexpectedLanKeyword));
+	int32 UnexpectedLanProtocolHash = 0;
+	TestFalse(
+		TEXT("LAN 创建设置不应发布 Steam 备用协议标识"),
+		LanCreateSettings.Get(ProjectProtocolHashSetting, UnexpectedLanProtocolHash));
 
 	FOnlineSessionSearch LanSearch;
 	TFU_OnlineSessionProviderTraits<EFU_OnlineProvider::Lan>::ConfigureSearch(LanSearch);
 	TestFalse(
 		TEXT("LAN 搜索不应携带 Steam Lobby 项目标识"),
 		LanSearch.QuerySettings.Get(SEARCH_KEYWORDS, UnexpectedLanKeyword));
+	TestFalse(
+		TEXT("LAN 搜索不应携带 Steam 备用协议标识"),
+		LanSearch.QuerySettings.Get(ProjectProtocolHashSetting, UnexpectedLanProtocolHash));
 
 	return true;
 }

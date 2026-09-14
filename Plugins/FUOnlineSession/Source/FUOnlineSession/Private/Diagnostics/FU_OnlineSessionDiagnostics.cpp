@@ -259,17 +259,34 @@ FFU_OnlineSessionDiagnostics::FFU_OnlineSessionDiagnostics(
 	const FFU_OnlineDiagnosticDispatchConfig& InConfig,
 	TFunction<void(const FFU_OnlineDiagnosticEvent&)> InBlueprintBroadcast,
 	FReportWriter InReportWriter,
-	FLogSink InLogSink)
+	FLogSink InLogSink,
+	FProviderLogWriter InProviderLogWriter)
 	: Config(InConfig)
 	, BlueprintBroadcast(MoveTemp(InBlueprintBroadcast))
 	, ReportWriter(MoveTemp(InReportWriter))
 	, LogSink(MoveTemp(InLogSink))
+	, ProviderLogWriter(MoveTemp(InProviderLogWriter))
 	, OverlayModel(MakeShared<FFU_OnlineDiagnosticOverlayModel>())
 {
 	// 【运行时防御】Subsystem 已消毒配置；这里仍做最小边界保护，让私有测试或未来调用者不会创建无界容器。
 	Config.HistoryLimit = FMath::Clamp(Config.HistoryLimit, 1, 1000);
 	Config.OverlayDurationSeconds = FMath::Clamp(Config.OverlayDurationSeconds, 1.0f, 60.0f);
 	Config.OverlayRowLimit = FMath::Clamp(Config.OverlayRowLimit, 1, 20);
+	// 使用 UE 当前运行环境的 Saved/Logs，而非插件安装目录；打包程序也无需写入只读插件内容。
+	ProviderLogRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(
+		FPaths::ProjectLogDir(), TEXT("FUOnlineSession"), TEXT("OnlineSubsystemLog")));
+	ProviderLogFilename = FString::Printf(TEXT("FUOnlineSession-%s-%s.log"),
+		*FDateTime::UtcNow().ToString(TEXT("%Y%m%d-%H%M%S")), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	if (!ProviderLogWriter)
+	{
+		// 每条事件完成追加后即关闭文件：不依赖正常退出时集中导出，也不受内存历史条数限制。
+		ProviderLogWriter = [](const FString& Contents, const FString& Destination)
+		{
+			return IFileManager::Get().MakeDirectory(*FPaths::GetPath(Destination), true)
+				&& FFileHelper::SaveStringToFile(Contents, *Destination,
+					FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
+		};
+	}
 	if (!ReportWriter)
 	{
 		// 【默认生产写入器】测试可注入失败 writer；运行时仍保持既有受限路径与 UTF-8 报告格式。
@@ -292,31 +309,75 @@ FFU_OnlineSessionDiagnostics::FFU_OnlineSessionDiagnostics(
 
 FFU_OnlineDiagnosticEvent FFU_OnlineSessionDiagnostics::Emit(const FFU_OnlineDiagnosticEvent& CandidateEvent)
 {
-	FFU_OnlineDiagnosticEvent Event = Sanitize(CandidateEvent);
-	// 【顺序不变量】Sequence 只由实际分发器分配，外部调用者不能伪造或倒退本 GameInstance 的诊断时间线。
-	Event.Sequence = ++NextSequence;
-
-	History.Add(Event);
-	if (History.Num() > Config.HistoryLimit)
+	// 最多为原事件附加一条磁盘故障事件；先完成内部写入，再进入可能重入/销毁 Subsystem 的 Blueprint。
+	TArray<FFU_OnlineDiagnosticEvent, TInlineAllocator<2>> Events;
+	Events.Add(Sanitize(CandidateEvent));
+	for (int32 Index = 0; Index < Events.Num(); ++Index)
 	{
-		History.RemoveAt(0, History.Num() - Config.HistoryLimit, EAllowShrinking::No);
+		// 序号仍只由分发器分配；局部副本避免追加故障事件时引用容器元素失效。
+		Events[Index].Sequence = ++NextSequence;
+		const FFU_OnlineDiagnosticEvent Event = Events[Index];
+		History.Add(Event);
+		if (History.Num() > Config.HistoryLimit)
+		{
+			History.RemoveAt(0, History.Num() - Config.HistoryLimit, EAllowShrinking::No);
+		}
+		if (Config.bEmitToLog)
+		{
+			const FString Line = FormatEventForOutput(Event);
+			LogSink(Event, Line);
+			const FString Destination = GetProviderLogPath(Event.Provider);
+			// 仅合法 Provider 可进入固定目录；屏幕严重级别过滤不影响磁盘完整事件流。
+			if (!Destination.IsEmpty() && !FailedFileProviders.Contains(Event.Provider)
+				&& !ProviderLogWriter(FString::Printf(TEXT("[%s] %s%s"),
+					*Event.TimestampUtc.ToIso8601(), *Line, LINE_TERMINATOR), Destination))
+			{
+				// 先熔断再追加反馈，因此反馈自身不会再次写入故障文件。另一个 Provider 不受影响。
+				FailedFileProviders.Add(Event.Provider);
+				FFU_OnlineDiagnosticEvent Failure;
+				Failure.Provider = Event.Provider;
+				Failure.OperationId = Event.OperationId;
+				Failure.WorldName = Event.WorldName;
+				Failure.PIEInstanceId = Event.PIEInstanceId;
+				Failure.Operation = EFU_OnlineDiagnosticOperation::Environment;
+				Failure.Phase = EFU_OnlineDiagnosticPhase::Completed;
+				Failure.Severity = EFU_OnlineDiagnosticSeverity::Error;
+				Failure.Code = TEXT("FU.Diagnostics.ProviderLogWriteFailed");
+				Failure.Status = TEXT("FileLoggingDisabled");
+				Failure.Message = TEXT("无法创建或追加 Provider 日志，当前 GameInstance 已停止该 Provider 的文件写入；其他诊断通道继续工作");
+				Failure.Cause = TEXT("目录创建或文件追加返回失败；未采集原始系统错误，具体原因需检查磁盘环境");
+				Failure.RecommendedAction = TEXT("用 GetProviderLogPath 获取路径，检查目录权限、磁盘空间和文件占用，修复后重启游戏或 PIE；可用 SaveDiagnosticReport 导出近期历史");
+				Events.Add(Sanitize(Failure));
+			}
+		}
+		// 无 Viewport 也能继续留存诊断；浮层过期不会删除文件或历史。
+		OverlayModel->Add(Event, Config, FDateTime::UtcNow());
 	}
 
-	if (Config.bEmitToLog)
+	// 复制回调和事件后不再访问 this，避免 Blueprint 触发生命周期变更后继续访问已销毁分发器。
+	const auto Broadcast = BlueprintBroadcast;
+	if (Broadcast)
 	{
-		LogSink(Event, FormatEventForOutput(Event));
+		for (const FFU_OnlineDiagnosticEvent& Event : Events)
+		{
+			Broadcast(Event);
+		}
 	}
+	return Events[0];
+}
 
-	// 浮层模型独立于实际 Viewport；没有 Viewport 时它只是暂不显示，绝不影响后续 Blueprint/历史。
-	OverlayModel->Add(Event, Config, FDateTime::UtcNow());
-
-	// 【不可关闭的可观测性】输出开关只控制日志/屏幕，不控制 Blueprint；项目 UI 始终能自行收集完整诊断。
-	if (BlueprintBroadcast)
+FString FFU_OnlineSessionDiagnostics::GetProviderLogPath(const EFU_OnlineProvider Provider) const
+{
+	// 目录名来自白名单常量，不接受房间名、错误文本或 Blueprint 自定义路径。
+	switch (Provider)
 	{
-		BlueprintBroadcast(Event);
+	case EFU_OnlineProvider::Steam:
+		return FPaths::Combine(ProviderLogRoot, TEXT("steam_log"), ProviderLogFilename);
+	case EFU_OnlineProvider::Lan:
+		return FPaths::Combine(ProviderLogRoot, TEXT("lan_log"), ProviderLogFilename);
+	default:
+		return FString();
 	}
-
-	return Event;
 }
 
 TArray<FFU_OnlineDiagnosticEvent> FFU_OnlineSessionDiagnostics::GetHistory() const
@@ -387,8 +448,7 @@ bool FFU_OnlineSessionDiagnostics::SaveReport(FString& OutSavedPath, FString& Ou
 	if (!IFileManager::Get().MakeDirectory(*ReportDirectory, true))
 	{
 		OutError = TEXT("无法创建 FUOnlineSession 诊断报告目录");
-		// 【非递归失败反馈】Emit 只进入历史/日志/浮层/Blueprint，不会再次调用 SaveReport，
-		// 因而能向使用者说明保存失败，又不会在磁盘不可写时形成递归写入循环。
+		// Emit 不会再次调用 SaveReport；自动 Provider 文件也有独立熔断，不会在磁盘故障时递归。
 		FFU_OnlineDiagnosticEvent FailureEvent;
 		FailureEvent.Operation = EFU_OnlineDiagnosticOperation::Environment;
 		FailureEvent.Phase = EFU_OnlineDiagnosticPhase::Completed;

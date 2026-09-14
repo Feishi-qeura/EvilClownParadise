@@ -151,14 +151,31 @@ bool FFUOnlineSessionDescriptorConfigContractTest::RunTest(const FString& Parame
 	bool bSteamEnabled = false;
 	bool bUseSteamNetworking = true;
 	bool bAllowP2PPacketRelay = false;
+	float P2PConnectionTimeout = 0.0f;
+	float P2PCleanupTimeout = 0.0f;
 	TestTrue(TEXT("Engine.ini 解析 Null 平台服务"), EngineIni.GetString(TEXT("OnlineSubsystem"), TEXT("DefaultPlatformService"), DefaultPlatformService));
 	TestEqual(TEXT("Engine.ini 默认使用 Null 平台服务"), DefaultPlatformService, FString(TEXT("Null")));
 	TestTrue(TEXT("Engine.ini 解析 Steam 启用开关"), EngineIni.GetBool(TEXT("OnlineSubsystemSteam"), TEXT("bEnabled"), bSteamEnabled));
 	TestTrue(TEXT("Engine.ini 启用 Steam 子系统"), bSteamEnabled);
 	TestTrue(TEXT("Engine.ini 解析 SteamSockets 全局接管开关"), EngineIni.GetBool(TEXT("OnlineSubsystemSteam"), TEXT("bUseSteamNetworking"), bUseSteamNetworking));
 	TestFalse(TEXT("Engine.ini 不让 SteamSockets 接管全局 Socket"), bUseSteamNetworking);
-	TestTrue(TEXT("Engine.ini 解析 Steam P2P 中继开关"), EngineIni.GetBool(TEXT("OnlineSubsystemSteam"), TEXT("bAllowP2PPacketRelay"), bAllowP2PPacketRelay));
+	// 【UE 5.8 配置迁移】这三个 P2P 键已由 SocketSubsystemSteamIP 读取；继续写在
+	// OnlineSubsystemSteam 会让每次打包启动都产生 deprecated/missing 警告。
+	TestFalse(
+		TEXT("Engine.ini 不在旧 OnlineSubsystemSteam 节保存 P2P 中继开关"),
+		EngineIni.GetBool(TEXT("OnlineSubsystemSteam"), TEXT("bAllowP2PPacketRelay"), bAllowP2PPacketRelay));
+	TestTrue(
+		TEXT("Engine.ini 在 UE 5.8 SocketSubsystemSteamIP 节解析 P2P 中继开关"),
+		EngineIni.GetBool(TEXT("SocketSubsystemSteamIP"), TEXT("bAllowP2PPacketRelay"), bAllowP2PPacketRelay));
 	TestTrue(TEXT("Engine.ini 允许 Steam P2P 中继"), bAllowP2PPacketRelay);
+	TestTrue(
+		TEXT("Engine.ini 在新节配置 P2P 连接超时"),
+		EngineIni.GetFloat(TEXT("SocketSubsystemSteamIP"), TEXT("P2PConnectionTimeout"), P2PConnectionTimeout));
+	TestEqual(TEXT("P2P 连接超时保持 UE 5.8 基准值"), P2PConnectionTimeout, 90.0f);
+	TestTrue(
+		TEXT("Engine.ini 在新节配置 P2P 清理超时"),
+		EngineIni.GetFloat(TEXT("SocketSubsystemSteamIP"), TEXT("P2PCleanupTimeout"), P2PCleanupTimeout));
+	TestEqual(TEXT("P2P 清理超时使用引擎安全默认值"), P2PCleanupTimeout, 1.5f);
 	TestFalse(TEXT("Engine.ini 不得保存开发 Steam AppID"), EngineIniText.Contains(TEXT("SteamDevAppId=")));
 
 	FString DefaultSettingsIniText;
@@ -166,13 +183,21 @@ bool FFUOnlineSessionDescriptorConfigContractTest::RunTest(const FString& Parame
 	TestTrue(TEXT("默认设置 ini 明确配置 SteamDevAppId=480"), DefaultSettingsIniText.Contains(TEXT("SteamDevAppId=480")));
 	TestTrue(TEXT("默认设置 ini 明确配置 ExpectedShippingSteamAppId=0"), DefaultSettingsIniText.Contains(TEXT("ExpectedShippingSteamAppId=0")));
 	TestTrue(TEXT("默认设置 ini 明确配置 OperationTimeoutSeconds=30.0"), DefaultSettingsIniText.Contains(TEXT("OperationTimeoutSeconds=30.0")));
+	TestTrue(TEXT("默认设置 ini 明确限制诊断浮层为 3 秒"), DefaultSettingsIniText.Contains(TEXT("OverlayDurationSeconds=3.0")));
 
 	FString EditorModuleSource;
 	TestTrue(TEXT("能够读取 FU Online Session Editor 模块实现"), FFileHelper::LoadFileToString(EditorModuleSource, *EditorModuleSourcePath));
-	// 【迁移契约】启动仅调用一次迁移入口；设置变更路径不得重新触发，避免持续管理项目配置。
+	// 【迁移契约】启动期调用一次迁移入口；用户之后显式将兼容开关切到 true 时，
+	// 设置回调也可再调用该幂等入口。普通设置变更不触发历史项目配置访问。
 	TestTrue(
 		TEXT("Editor 启动调用一次历史配置迁移"),
 		EditorModuleSource.Contains(TEXT("FFUOnlineSessionConfigManager::EnsureProjectConfiguration")));
+	TestTrue(
+		TEXT("启用兼容开关时允许一次性迁移"),
+		FFUOnlineSessionConfigManager::ShouldRunLegacyMigration(true));
+	TestFalse(
+		TEXT("关闭兼容开关时禁止触碰项目配置"),
+		FFUOnlineSessionConfigManager::ShouldRunLegacyMigration(false));
 
 	const UFU_OnlineSessionSettings* Settings = GetDefault<UFU_OnlineSessionSettings>();
 	TestEqual(TEXT("设置保存到插件专属配置域"), Settings->GetClass()->ClassConfigName, FName(TEXT("FUOnlineSession")));
@@ -197,6 +222,7 @@ bool FFUOnlineSessionDescriptorConfigContractTest::RunTest(const FString& Parame
 
 	TestNumericDefault(TEXT("ExpectedShippingSteamAppId"), 0.0);
 	TestNumericDefault(TEXT("OperationTimeoutSeconds"), 30.0);
+	TestNumericDefault(TEXT("OverlayDurationSeconds"), 3.0);
 
 	return true;
 }

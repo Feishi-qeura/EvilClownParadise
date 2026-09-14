@@ -41,11 +41,11 @@
 			"Enabled": false
 		},
 		{
-			"Name": "FUOnlineSession",
-			"Enabled": false
+			"Name": "SteamSockets",
+			"Enabled": true
 		},
 		{
-			"Name": "SteamSockets",
+			"Name": "SocketSubsystemSteamIP",
 			"Enabled": true
 		}
 	]

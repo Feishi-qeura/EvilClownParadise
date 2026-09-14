@@ -54,7 +54,7 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category="FUOnlineSession|Online Session|Steam|Status")
 	FFU_OnlineProviderStatus CheckSteamProviderStatus() const;
-
+	
 	/**
 	 * 同步检查NULL/LAN所需运行环境
 	 * NULL不需要Steam Identity登录，只要NULL子系统和Session Interface可用即可
@@ -83,6 +83,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category="FUOnlineSession|Diagnostics")
 	bool SaveDiagnosticReport(FString& OutSavedPath, FString& OutError);
+
+	/**
+	 * 查询当前 GameInstance 的 Provider 自动日志绝对路径，便于打包游戏 UI 显示真实保存位置。
+	 * 首条该 Provider 诊断才创建文件；日志关闭/写入失败时路径不保证存在，未初始化或非法枚举返回空串。
+	 */
+	UFUNCTION(BlueprintPure, Category="FUOnlineSession|Diagnostics")
+	FString GetProviderLogPath(EFU_OnlineProvider Provider) const;
 
 	/**
 	 * 同步读取指定 Provider 的现有状态，并将一次已脱敏的环境快照广播到诊断历史。
@@ -221,6 +228,10 @@ private:
 		FString PendingCreateRoomName;
 		//查找完成后过滤房间名称时使用
 		FString PendingFindRoomName;
+
+		// 【Steam 双阶段搜索】false=项目关键字精确查询，true=房间名/宽查询降级。
+		// 它同时作为回调 pass token，防止第一遍的重复旧回调误完成第二遍搜索。
+		bool bSteamFallbackFindInProgress = false;
 		
 		//测试密码
 		FString PendingCreateRoomPassword;
@@ -241,6 +252,10 @@ private:
 
 		// 每次提交都使用 generation 捕获的一次性 watchdog；Busy/预检拒绝不得触碰该 Handle。
 		FTimerHandle OperationWatchdogHandle;
+
+		// TryRecoverProvider 会发 Blueprint 诊断，而监听器可以同步再次调用 TryRecoverProvider。
+		// 该实例级门只屏蔽嵌套栈帧，不跨帧持有，也不代替状态机的 generation/phase 判断。
+		bool bRecoveryEntryInProgress = false;
 
 		// 状态机是操作生命周期唯一事实源；旧 OperationState 已删除，避免双份状态漂移。
 		TUniquePtr<FFU_OnlineOperationStateMachine, FFU_OnlineOperationStateMachineDeleter> OperationMachine;
@@ -346,7 +361,11 @@ private:
 	//保存State.SessionSearch->SearchResults
 	//bWasSuccessful为true，SearchResults为空则表示查找正常，房间没有被找到
 	template<EFU_OnlineProvider Provider>
-	void FU_OnFindSessionsComplete(bool bWasSuccessful, uint64 Generation);
+	void FU_OnFindSessionsComplete(
+		bool bWasSuccessful,
+		uint64 Generation,
+		bool bSteamFallbackPass,
+		TSharedPtr<FOnlineSessionSearch> ExpectedSearch);
 
 	//NAME_GameSession。Result：输出对应的结果
 	template<EFU_OnlineProvider Provider>
@@ -403,11 +422,13 @@ private:
 	/**
 	 * 网络/旅行失败通常发生在 OSS 回调已经把状态机置 Idle 之后；状态机仍保留最近的
 	 * ActiveOperationId，因此这里仅只读继承该身份。没有任何关联操作时才创建独立 ID。
+	 * RootKind 也通过 OutRootKind 一起返回，让后续 Lease 诊断使用同一快照，不受 Blueprint 同步重入影响。
 	 */
 	FGuid FU_EmitConnectionFailureDiagnostic(
 		EFU_OnlineProvider Provider,
 		bool bIsTravelFailure,
-		const TCHAR* StableStatus);
+		const TCHAR* StableStatus,
+		EFU_OperationKind& OutRootKind);
 
 	/**
 	 * Network/TravelFailure 只在接口有效、NamedSession 已消失、无 OSS 回调在途且全 World 安全时释放。
@@ -421,6 +442,16 @@ private:
 	 */
 	EFU_NetDriverLeaseResult FU_RequestNetDriverLeaseRelease(EFU_OnlineProvider Provider, const TCHAR* Reason);
 
+	/**
+	 * 尚未 Reserve 或已经终止状态机的路径必须显式提供诊断身份，避免 Lease 事件误借上一次操作的 ID。
+	 * 该重载只改变可观察上下文；租约所有权和恢复策略仍完全由协调器判断。
+	 */
+	EFU_NetDriverLeaseResult FU_RequestNetDriverLeaseRelease(
+		EFU_OnlineProvider Provider,
+		const TCHAR* Reason,
+		EFU_OperationKind DiagnosticRootKind,
+		const FGuid& DiagnosticOperationId);
+
 	/** 以下 helper 只在 generation/kind/phase 验证通过后操作精确资源，保证迟到回调不能清新请求。 */
 	template<EFU_OnlineProvider Provider>
 	FFU_OnlineOperationStateMachine& FU_GetOperationMachine();
@@ -429,7 +460,10 @@ private:
 	FFU_OperationTicket FU_BeginOperationAttempt(EFU_OperationKind RootKind);
 
 	template<EFU_OnlineProvider Provider>
-	bool FU_SubmitOperation(FFU_OperationTicket& Ticket, EFU_OperationKind SubmittedKind, uint64& OutGeneration);
+	bool FU_ReserveOperation(FFU_OperationTicket& Ticket, EFU_OperationKind SubmittedKind, uint64& OutGeneration);
+
+	template<EFU_OnlineProvider Provider>
+	void FU_EmitOperationSubmitted(EFU_OperationKind SubmittedKind, uint64 Generation);
 
 	template<EFU_OnlineProvider Provider>
 	void FU_ArmOperationWatchdog(uint64 Generation);
