@@ -38,9 +38,9 @@ public:
 
 protected:
 	
-	UFUNCTION()
 	virtual void BeginPlay() override;
 	
+public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|AI")
 	float PatrolRadius = 1500.f;
 	
