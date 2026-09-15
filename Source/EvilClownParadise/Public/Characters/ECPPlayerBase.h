@@ -14,4 +14,5 @@ class EVILCLOWNPARADISE_API AECPPlayerBase : public AECPCharBase
 {
 	GENERATED_BODY()
 	
+	
 };

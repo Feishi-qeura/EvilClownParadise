@@ -38,6 +38,9 @@
 		},
 		{
 			"Name": "OnlineSubsystemSteam",
+			"Enabled": true
+		},
+		{
 			"Name": "GameplayStateTree",
 			"Enabled": true
 		},
@@ -51,6 +54,10 @@
 		},
 		{
 			"Name": "SocketSubsystemSteamIP",
+			"Enabled": true
+		},
+		{
+			"Name": "PoseSearch",
 			"Enabled": true
 		}
 	]
