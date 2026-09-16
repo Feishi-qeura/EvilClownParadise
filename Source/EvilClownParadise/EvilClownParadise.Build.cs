@@ -8,7 +8,7 @@ public class EvilClownParadise : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "NavigationSystem", "StateTreeModule", "GameplayTasks"});
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "NavigationSystem", "StateTreeModule", "GameplayTasks","EnhancedInput" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] {"GameplayStateTreeModule"});
 		
