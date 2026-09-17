@@ -8,23 +8,12 @@ public class EvilClownParadise : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "NavigationSystem", "StateTreeModule", "GameplayTasks","EnhancedInput" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "NavigationSystem", "StateTreeModule", "GameplayTasks", "EnhancedInput" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] {"GameplayStateTreeModule"});
-		
-		//显式加载Steam在线服务模块
-		
-		if (Target.Platform == UnrealTargetPlatform.Win64)
-		{
-			DynamicallyLoadedModuleNames.Add("OnlineSubsystemSteam");
-		}
+		PrivateDependencyModuleNames.AddRange(new string[] { "GameplayStateTreeModule" });
 
-		// Uncomment if you are using Slate UI
-		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
-		
-		// Uncomment if you are using online features
-		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
-
-		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
+		// Steam 在线服务：模块加载由 .uproject 里的 OnlineSubsystemSteam 插件声明负责，
+		// 这里不需要也不应写入 DynamicallyLoadedModuleNames（那是给非链接加载的程序目标用的）。
+		// 若日后 C++ 直接引用 OnlineSubsystemSteam 的类型，再把它加入 PrivateDependencyModuleNames。
 	}
 }
