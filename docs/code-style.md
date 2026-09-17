@@ -8,7 +8,11 @@
 1. 前缀 `ECP`（类 `AECPMonsterBase`，文件同名）；模板/委托用 `FECP`，枚举 `EECP`，结构 `FECP`。
 2. 头文件放 `Public/<分类>/`，私有实现放 `Private/<分类>/`，目录名用语义分类（`Characters`、`AI`、`Camera`、`Data`…）。新目录归类拿不准就先问。
 3. 类别（Category）统一 `ECP|主题`（现有惯例：`ECP|Health`、`ECP|3C`、`ECP|AI`），蓝图侧查找靠它过滤。
-4. 日志用 `DEFINE_LOG_CATEGORY_STATIC(LogECPxxx, ...)`，不要裸用 `LogTemp`。
+4. 日志：项目级类别 `LogECP` 已在 `Public/ECPCore.h` 声明、`EvilClownParadise.cpp` 定义，
+   直接用 `UE_LOG(LogECP, ...)`。局部细分可用 `DEFINE_LOG_CATEGORY_STATIC(LogECPxxx, ...)`
+   （如 `LogECPPlayerInput`），**不要裸用 `LogTemp`**——分类日志才能单独过滤与提级。
+5. 玩家/怪物以外的角色子类记得指定阵营：`AECPCharBase` 默认是 `NoTeam`，
+   不指定会被 AI 感知判成中立（见 `Public/ECPCore.h` 里 `ECPTeam` 的说明）。
 
 ## 写法要点
 
