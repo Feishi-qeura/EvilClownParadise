@@ -6,7 +6,6 @@
 !/.gitattributes
 !/.clang-format
 !/.editorconfig
-!/.gitignore
 !/EvilClownParadise.uproject
 !/README.md
 !/Source/
@@ -31,17 +30,15 @@ Plugins/Developer/
 # 商店插件不入库（授权限制再分发；团队各自从 Marketplace 安装）
 Plugins/Marketplace/
 
-# 学习/演示素材不入库（完整副本在 E:\UnrealProjects\ECP_Archive\Content_zxx）。
-# 仅保留 ABP_ECPCommon 依赖的骨架文件，待编辑器内迁移到 _Game 后可彻底移除
-Content/zxx/*
-!Content/zxx/Character/
-Content/zxx/Character/*
-!Content/zxx/Character/PolygonSyntyCharacter_Skeleton.uasset
+# 学习/演示素材不入库，且已从磁盘移出（完整副本：E:\UnrealProjects\ECP_Archive\Content_zxx）。
+# 原先为 ABP_ECPCommon 保留的骨架白名单例外已随资产迁入 _Game 而取消。
+Content/zxx/
 
 # 插件演示内容不入库（副本在 E:\UnrealProjects\ECP_Archive\FUOnlineSession_Content）；
 # 会话插件只需 Source 与 Config 即可工作
 Plugins/FUOnlineSession/Content/
 
-# 个人沙盒与本地集合（Developers 目录按 UE 官方约定仅本机使用，不提交）
+# 个人沙盒与本地集合：按 UE 官方约定仅本机使用，磁盘保留但不提交。
+# 注意：gitignore 不能撤销已跟踪文件，出库用 `git rm -r --cached <路径>`。
 Content/Developers/
 Content/Collections/
