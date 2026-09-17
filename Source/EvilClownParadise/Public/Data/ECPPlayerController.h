@@ -31,13 +31,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> LookAction;
 
-	// 下蹲在开始按下时切换一次，按住不重复切换。
+	// 按住蹲：Started 进蹲、松开/取消站起（不是切换式）。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> CrouchAction;
 
 	// 跳跃开始时提出请求，松开或取消时停止持续跳跃；未配置时不启用。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> JumpAction;
+	
+	UPROPERTY(EditDefaultsOnly , BlueprintReadOnly, Category = "ECP|Input")
+	TObjectPtr<UInputAction> SprintAction;
 
 	// 默认与原 AddMappingContext 节点一致，数值越大优先级越高。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
@@ -47,25 +50,27 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	FVector2D LookSensitivity = FVector2D(0.2, 0.2);
 
-	// 保留原移动轴打印，并允许通过蓝图关闭调试输出。
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input|Debug")
-	bool bPrintMovementInput = true;
-
 protected:
 	// 为当前本地玩家启用映射，不依赖蓝图缓存 Pawn 的时机。
 	virtual void BeginPlay() override;
 
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	// 控制器的输入绑定入口，保留父类初始化。
 	virtual void SetupInputComponent() override;
-
-	// 退出时只移除本类安装的映射，保留 UI 等其他上下文。
-	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-
+	
 private:
 	// 回调始终获取当前 Pawn，避免重生后继续访问旧角色。
 	void Move(const FInputActionValue& Value);
+	// 松开全部移动键时把 MoveInput 归零 —— Enhanced Input 那一帧只发 Completed，
+	// 不会补发一个值为 0 的 Triggered，不归零的话 MoveInput 会一直停在最后一次的值。
+	void StopMove();
 	void Look(const FInputActionValue& Value);
-	void ToggleCrouch();
+	
+	void StartCrouch();
+	void StopCrouch();
+	
+	void StartSprint();
+	void StopSprint();
 
 	// 跳跃开始与结束分开处理，支持按住跳得更高的 Character 配置。
 	void StartJump();

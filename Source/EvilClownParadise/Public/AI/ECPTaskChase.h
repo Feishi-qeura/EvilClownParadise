@@ -13,7 +13,6 @@ struct FECPTaskChaseInstanceData
 {
 	GENERATED_BODY()
 	
-	float LastMoveTime = 0.0f;
 };
 
 USTRUCT()
@@ -23,12 +22,10 @@ struct FECPTaskChase : public FStateTreeTaskCommonBase
 	
 	using FInstanceDataType = FECPTaskChaseInstanceData;
 	
-	UPROPERTY(EditAnywhere, Category= "ECP|AI")
-	float AcceptanceRadius = 50.f;
+	// 追击的停止距离不在这里配置：由怪物自身的 AttackRange 派生（见 ECPTaskChase.cpp）
 	
-	virtual const UStruct* GetInstanceDataType() const override { return FECPTaskChaseInstanceData::StaticStruct(); };
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); };
 	
 	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
 	virtual void ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const override;
-	
 };

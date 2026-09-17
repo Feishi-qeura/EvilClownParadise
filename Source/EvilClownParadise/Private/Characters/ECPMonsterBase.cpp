@@ -7,7 +7,8 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 
-AECPMonsterBase::AECPMonsterBase()
+AECPMonsterBase::AECPMonsterBase(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
 {
 	AIControllerClass = AECPAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
@@ -20,6 +21,13 @@ void AECPMonsterBase::BeginPlay()
 	{
 		PatrolOrigin = GetActorLocation();
 	}
+}
+
+bool AECPMonsterBase::HasTarget() const
+{
+	// 目标已死亡也算没有目标：玩家死亡不销毁 Actor，这里不判掉，状态机会一直卡在追击/攻击
+	const AECPCharBase* TargetChar = Cast<AECPCharBase>(TargetActor);
+	return IsValid(TargetActor) && !(TargetChar && TargetChar -> IsDead());
 }
 
 bool AECPMonsterBase::IsTargetInAttackRange() const

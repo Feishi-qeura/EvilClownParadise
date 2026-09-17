@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "StateTreeTaskBase.h"
-#include "ECPTaskAttack.Generated.h"
+#include "ECPTaskAttack.generated.h"
 
 /**
  * 

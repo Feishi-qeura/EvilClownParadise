@@ -35,7 +35,7 @@ struct FECPTaskPatrol : public FStateTreeTaskCommonBase
 	UPROPERTY(EditAnywhere, Category= "ECP|AI")
 	float PauseDuration = 0.5f;
 	
-	/** 认定"已到达"的距离阈值（判定时放宽一倍），同时作为 MoveTo 的接受半径 */
+	/** 认定"已到达"的距离阈值；MoveTo 的停止距离会叠加胶囊半径，所以到达判定放宽到本值的 2 倍 */
 	UPROPERTY(EditAnywhere, Category= "ECP|AI")
 	float AcceptanceRadius = 100.f;
 	

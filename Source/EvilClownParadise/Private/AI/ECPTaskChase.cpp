@@ -10,7 +10,7 @@ EStateTreeRunStatus FECPTaskChase::EnterState(FStateTreeExecutionContext& Contex
                                              const FStateTreeTransitionResult& Transition) const
 {
 	AECPMonsterBase* Monster = ECPTree::GetMonster(Context);
-	AECPAIController* AIController = Cast<AECPAIController>(Monster -> GetController());
+	AECPAIController* AIController = Monster ? Cast<AECPAIController>(Monster -> GetController()) : nullptr	;
 	if (!Monster || !AIController)
 	{
 		return EStateTreeRunStatus::Failed;
@@ -18,7 +18,8 @@ EStateTreeRunStatus FECPTaskChase::EnterState(FStateTreeExecutionContext& Contex
 	
 	Monster -> SetMaxWalkSpeed(Monster -> ChaseSpeed);
 	
-	AIController -> MoveToActor(Monster -> GetTarget(), AcceptanceRadius);
+	// 追到攻击范围的一半就停，保证停下时已经在攻击圈内（真实停止距离 = 本值 + 胶囊半径）
+	AIController -> MoveToActor(Monster -> GetTarget(), Monster -> AttackRange * 0.5f);
 	
 	return EStateTreeRunStatus::Running;
 }

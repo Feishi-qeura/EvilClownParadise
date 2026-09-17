@@ -15,7 +15,7 @@ class EVILCLOWNPARADISE_API AECPCharBase : public ACharacter
 	GENERATED_BODY()
 
 public:
-	AECPCharBase();
+	AECPCharBase(const FObjectInitializer& ObjectInitializer);
 
 	/** 属性升级商店会改这个值 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Health")

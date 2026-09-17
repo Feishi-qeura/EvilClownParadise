@@ -29,18 +29,10 @@ AECPAIController::AECPAIController()
 	PerceptionComponent = AIPerceptionComp;
 }
 
-void AECPAIController::BeginPlay()
-{
-	Super::BeginPlay();
-}
 
 void AECPAIController::PostInitializeComponents()
 {
 	Super::PostInitializeComponents();
-	if (DefaultStateTree)
-	{
-		StateTreeAIComp -> SetStateTree(DefaultStateTree);
-	}
 	
 	// 事件绑定
 	AIPerceptionComp -> OnTargetPerceptionUpdated.AddDynamic(this, &AECPAIController::OnTargetPerceptionUpdated);
@@ -51,12 +43,17 @@ void AECPAIController::OnTargetPerceptionUpdated(AActor* Actor, struct FAIStimul
 	AECPMonsterBase* Monster = GetPawn<AECPMonsterBase>();
 	AECPPlayerBase* Player = Cast<AECPPlayerBase>(Actor);
 	
-	if (Monster && Player && !Player -> IsDead())
+	if (!Monster || !Player) { return; };
+	
+	if (Stimulus.WasSuccessfullySensed() && !Player -> IsDead())
 	{
-		Monster -> SetTarget(Stimulus.WasSuccessfullySensed() ? Player : nullptr);
-		if (Stimulus.WasSuccessfullySensed())
-		{
-			GEngine -> AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, FString::Printf(TEXT("%s看见了玩家：%s"), *Monster -> GetName(), *Player -> GetName()));
-		}
+		Monster -> SetTarget(Player);
+		GEngine -> AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, FString::Printf(TEXT("%s看见了玩家：%s"), *Monster -> GetName(), *Player -> GetName()));
+	}
+	// 丢失视野：只清自己当前盯着的目标。
+	// 玩家死亡不会走到这里——尸体仍算"看得见"，且视觉感知只在成功/失败翻转时才回调，"目标已死"由 HasTarget() 每帧判掉
+	else if (Actor == Monster -> GetTarget())
+	{
+		Monster -> SetTarget(nullptr);
 	}
 }

@@ -16,12 +16,9 @@ public:
 
 
 protected:
-	virtual void BeginPlay() override;
 	
 	virtual void PostInitializeComponents() override;
 	
-	UPROPERTY(EditDefaultsOnly, Category="ECP|AI")
-	TObjectPtr<class UStateTree> DefaultStateTree;
 	
 	UPROPERTY(EditAnywhere)
 	TObjectPtr<class UAISenseConfig_Sight> SightConfig;
