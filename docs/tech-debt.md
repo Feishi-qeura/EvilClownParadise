@@ -21,8 +21,15 @@
 
 ## 需要决策/协作的事项
 
-- [ ] **远程分支改名/删除**（见 docs/branching.md）：`FEISHI_NULL`、`ZANEN_Test`、`SANC` 建议删除；
-      `ZANEN`/`FEISHI` 成果合入 main 后改名退役；开 main 保护规则。
+- [ ] **剩余个人分支清理**（见 docs/branching.md）：`ZANEN`、`ZANEN_Test` 已删除（成果已并入 main
+      或经本人确认无用）；`FEISHI`（在线会话工作，应作为功能提 PR 合入 main 后退役）、
+      `FEISHI_NULL`、`SANC` 仍待各自处理。
+- [ ] **开启 main 分支保护**：Settings → Branches → Add rule（require PR、require review、
+      require CI pass）。否则"合并一律走 PR"只是自觉，直推 main 不会被拦。
+- [ ] **确认后可删标签 `archive/zanen-test-online`**：它是 `ZANEN_Test` 那份在线登录实验
+      （`ECPOnlineLoginAsync` 126 行 + `WBP_TestSteam` UI）的**唯一留存副本**。本人已确认该工作
+      无用；若永久不需要，执行
+      `git tag -d archive/zanen-test-online && git push origin --delete archive/zanen-test-online`。
 - [ ] **LFS 历史瘦身**：`.git` 目前约 662MB，其中 `.git/objects` 609MB —— LFS 只接管了当前版本
       （196 个），历史里的二进制仍在。彻底瘦身需 `git lfs migrate import --everything` +
       force push + 全员重新 clone，安排一次团队同步窗口。

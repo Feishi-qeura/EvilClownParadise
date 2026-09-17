@@ -17,22 +17,34 @@
 3. 改动**二进制资产**（uasset/umap）的分支在开分支前先在群里声明影响的资产，避免两个分支同时编辑同一资产——二进制无法合并，只能丢弃一边。
 4. 开发中途要切分支：用 `git stash` 或本地临时提交后 `git reset --hard`，不要把 WIP 提交推到公共分支。
 
-## 现存分支的迁移（需要各自执行）
+## 个人分支的清理进度
 
-当前 `FEISHI`、`FEISHI_NULL`、`ZANEN`、`ZANEN_Test`、`SANC` 与 `main` 平行。迁移方式：
-
-1. 把各自分支的成果以功能为单位提 PR 合入 `main`（一次功能一个 PR，便于 review）。
-2. 合并后删除远程个人分支，例如：
+个人长活分支与 `main` 平行时，`main` 会落后、冲突滚雪球（uasset 不可合并，冲突尤其昂贵）。
+清理方式：成果以功能为单位提 PR 合入 `main`，合并后删除远程与本地分支：
 
 ```bash
-git push origin --delete ZANEN_Test
-git push origin --delete FEISHI_NULL
-git push origin --delete SANC        # 若已合并
-git branch -d ZANEN_Test             # 本地
+git push origin --delete <分支名>     # 远程
+git branch -d <分支名>                # 本地（-d 会校验已合并）
 ```
 
-3. 新工作开短命分支：`git checkout -b feature/3c-crouch-camera main`
-4. `main` 建议开启保护：Settings → Branches → Add rule（require PR、require CI pass）。
+**进度（2026-09-17）**
+
+| 分支 | 状态 |
+|---|---|
+| `ZANEN` | ✅ 已删除。成果已全部并入 `main`（0 个独有提交），本地 + 远程已删 |
+| `ZANEN_Test` | ✅ 已删除。独有工作为在线登录实验（`ECPOnlineLoginAsync.h/.cpp` 126 行、`WBP_TestSteam` UI、在线相关配置），经本人确认已无用。**删除前打了标签 `archive/zanen-test-online` 作为唯一留存副本**——该工作在任何分支与归档里都只此一份，确认永久不需要后可删标签 |
+| `FEISHI` | ⏳ 待处理。在线会话工作，应作为功能提 PR 合入 `main` 后退役 |
+| `FEISHI_NULL` | ⏳ 待处理。需本人确认是否有用（提交标题为 `111`） |
+| `SANC` | ⏳ 待处理 |
+
+> **教训**：删除前务必用 `git rev-list --left-right --count main...<分支>` 与
+> `git log main..<分支>` 确认独有提交。`ZANEN_Test` 的提交标题全是 `111`，
+> 但内容是一整套在线登录实现——**标题是垃圾不代表内容是垃圾**。
+
+后续：
+
+1. 新工作开短命分支：`git checkout -b feature/3c-crouch-camera main`
+2. `main` 开启保护：Settings → Branches → Add rule（require PR、require CI pass）。
 
 ## 与二进制资产相关的约定
 
