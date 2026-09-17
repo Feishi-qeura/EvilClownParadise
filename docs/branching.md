@@ -31,11 +31,15 @@ git branch -d <分支名>                # 本地（-d 会校验已合并）
 
 | 分支 | 状态 |
 |---|---|
-| `ZANEN` | ✅ 已删除。成果已全部并入 `main`（0 个独有提交），本地 + 远程已删 |
-| `ZANEN_Test` | ✅ 已删除。独有工作为在线登录实验（`ECPOnlineLoginAsync.h/.cpp` 126 行、`WBP_TestSteam` UI、在线相关配置），经本人确认已无用。**删除前打了标签 `archive/zanen-test-online` 作为唯一留存副本**——该工作在任何分支与归档里都只此一份，确认永久不需要后可删标签 |
-| `FEISHI` | ⏳ 待处理。在线会话工作，应作为功能提 PR 合入 `main` 后退役 |
-| `FEISHI_NULL` | ⏳ 待处理。需本人确认是否有用（提交标题为 `111`） |
-| `SANC` | ⏳ 待处理 |
+| `ZANEN` | ✅ 已删除。成果已全部并入 `main`（0 个独有提交） |
+| `ZANEN_Test` | ✅ 已删除。独有工作为在线登录实验（`ECPOnlineLoginAsync.h/.cpp` 126 行、`WBP_TestSteam` UI、在线配置），经本人确认无用。**唯一留存副本是标签 `archive/zanen-test-online`**，确认永久不需要后可删 |
+| `chore/repo-hardening` | ✅ 已删除。第二轮正规化改造的功能分支，已并入 `main`，从未推送远端 |
+| `FEISHI` | ✅ **可安全删除**：已全部并入 `main`（0 个独有提交） |
+| `SANC` | ✅ **可安全删除**：已全部并入 `main`（0 个独有提交） |
+| `FEISHI_NULL` | ✅ **可安全删除**：唯一独有提交 `dbd61c9` 是**回退性**改动（删除 `FU_OnlineProviderStatusEvaluator.h`、19 行自动化测试，简化 subsystem，净 +14/-80），`main` 上已有更完整的版本，删除不丢有效工作 |
+
+> 上表"可安全删除"的分支仍挂着，删不删由各自负责人定——`FEISHI`/`FEISHI_NULL`/`SANC`
+> 是同事的工作分支，不由他人代删。核对命令见下方教训。
 
 > **教训**：删除前务必用 `git rev-list --left-right --count main...<分支>` 与
 > `git log main..<分支>` 确认独有提交。`ZANEN_Test` 的提交标题全是 `111`，

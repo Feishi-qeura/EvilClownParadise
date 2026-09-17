@@ -21,9 +21,10 @@
 
 ## 需要决策/协作的事项
 
-- [ ] **剩余个人分支清理**（见 docs/branching.md）：`ZANEN`、`ZANEN_Test` 已删除（成果已并入 main
-      或经本人确认无用）；`FEISHI`（在线会话工作，应作为功能提 PR 合入 main 后退役）、
-      `FEISHI_NULL`、`SANC` 仍待各自处理。
+- [ ] **剩余个人分支清理**（见 docs/branching.md）：`ZANEN`、`ZANEN_Test`、`chore/repo-hardening`
+      已删除。剩下的 `FEISHI`、`SANC`、`FEISHI_NULL` 经核对**都已可安全删除**（前两个 0 独有提交；
+      `FEISHI_NULL` 的唯一独有提交是回退性改动，main 上版本更完整）——但它们是同事的工作分支，
+      删不删由各自负责人定。
 - [ ] **开启 main 分支保护**：Settings → Branches → Add rule（require PR、require review、
       require CI pass）。否则"合并一律走 PR"只是自觉，直推 main 不会被拦。
 - [ ] **确认后可删标签 `archive/zanen-test-online`**：它是 `ZANEN_Test` 那份在线登录实验
