@@ -30,6 +30,13 @@ Plugins/Developer/
 # 商店插件不入库（授权限制再分发；团队各自从 Marketplace 安装）
 Plugins/Marketplace/
 
+# 学习/演示素材不入库（完整副本在 E:\UnrealProjects\ECP_Archive\Content_zxx）。
+# 仅保留 ABP_ECPCommon 依赖的骨架文件，待编辑器内迁移到 _Game 后可彻底移除
+Content/zxx/*
+!Content/zxx/Character/
+Content/zxx/Character/*
+!Content/zxx/Character/PolygonSyntyCharacter_Skeleton.uasset
+
 # 个人沙盒与本地集合（Developers 目录按 UE 官方约定仅本机使用，不提交）
 Content/Developers/
 Content/Collections/
