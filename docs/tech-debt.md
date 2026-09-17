@@ -52,6 +52,21 @@
 
 ## 已完成
 
+### 2026-09-17 第三轮：_Game 分层重组（已推送 main）
+
+- [x] `Characters/TestRobot/` 建为角色自包含目录；4 个动画序列从顶层 `Animations/` 迁入其
+      `Animations/` 子目录
+- [x] `Animations/ABP_TestRobot` 留在顶层共享层：ABP 跨角色复用、数量有限，不随单个角色退役
+- [x] `AI/` 从 `Data/AI/` 提出（`AIC_ClownBase`、`ST_MonsterBase`）
+- [x] `Blueprints/` 收拢玩法蓝图：`GM_InGame`、`PC_InGame` 从 `Data/` 迁入；
+      `BP_ClownBase` 移入 `Blueprints/Monsters/`
+- [x] `Inputs/InputActions/` 更名为 `Inputs/InputAction/`
+- [x] 迁移在编辑器内完成，随后 Fix Up Redirectors + Save All；验收残留重定向器 0、
+      `IMC_Player` 已指向新路径
+- [x] Cook 端到端验证：`Success - 0 error(s), 1 warning(s)`（唯一 warning 是 EOS SDK 联网
+      失败的 `libcurl error 35`，与资产无关）
+- [x] 推送 main（`ab10b48..dbaf65e`，快进无冲突）
+
 ### 2026-09-17 第二轮：代码与资产正规化（分支 `chore/repo-hardening`）
 
 **代码**
@@ -120,9 +135,8 @@
 
 ## 已知副作用与善后（2026-09-17 第二轮操作遗留）
 
-- [ ] **Git LFS 锁未释放**：迁移过程中创建了 14 个锁（`BP_Player`、`BP_ClownBase`、
-      `ABP_TestRobot` 及 11 个沙盒资产），当时 GitHub 连接超时无法解锁。
-      联网后执行 `git lfs unlock --all` 或逐个解锁，否则会挡住同事编辑这些文件。
+- [x] ~~**Git LFS 锁未释放**~~ —— 已全部释放（14 个）。`git lfs unlock` **没有 `--all` 参数**，
+      需按路径逐个解锁；`git lfs locks` 退出码 0 且输出为空即为清空。
 - [ ] **引擎安装目录被重存过**：为修重定向跑过一次 `-run=ResavePackages -FixupRedirectors`，
       该命令未限定范围，连 `D:\UE_5.8\Engine\Content` 也重存了部分包并删除了引擎内未引用的
       重定向器。影响面很小，但建议在 Epic Launcher 里对 UE 5.8 执行一次 **Verify** 恢复引擎文件。

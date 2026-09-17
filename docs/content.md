@@ -52,17 +52,17 @@ _Game/
         A_Crouch_FwdStrafeFL_Masc
     <下一个角色>/                ← 加角色 = 加目录，不碰任何现有目录
 
-  Blueprints/                   ← 玩法蓝图（非角色资产）
-    BP_Player
-    BP_ClownBase
-
   AI/                           ← AI 决策与控制器
     AIC_ClownBase
-    StateTree/ST_MonsterBase
+    ST_MonsterBase
+
+  Blueprints/
+    GM_InGame  PC_InGame
+    Monsters/BP_ClownBase       ← 同类蓝图再分一层（怪物类）
 
   Data/                         ← DataTable / Curve / DataAsset（有内容时再建）
   Maps/                         ← L_Test（当前启动地图，见 DefaultEngine.ini 的 GameMapsSettings）
-  Inputs/                       ← IMC_Player、InputActions/IA_*
+  Inputs/                       ← IMC_Player、InputAction/IA_*
   UI/  Audio/  VFX/             ← 有内容时再建
 ```
 
@@ -104,8 +104,12 @@ Animations/
 > `ABP_TestRobot` 还算诚实；等玩家与小丑的模型分开、共用这个 ABP 时，应改名为
 > `ABP_Humanoid` / `ABP_CharacterBase` 之类，否则名字会误导。
 
-> **当前现实**：`BP_Player` 与 `BP_ClownBase` 共用同一套模型/骨架/动画（`TestRobot` 是占位资产）。
-> 真实模型到位后各自建 `Characters/Player/`、`Characters/Clown/`，`TestRobot` 即可整体删除。
+> **当前现实**：`BP_Player` 与 `Blueprints/Monsters/BP_ClownBase` 共用同一套模型/骨架/动画
+> （`TestRobot` 是占位资产）。真实模型到位后各自建 `Characters/Player/`、`Characters/Clown/`，
+> `TestRobot` 即可整体删除。
+>
+> **待办**：`Characters/TestRobot/` 里的 `PolygonSyntyCharacter` / `_Skeleton` / `_PhysicsAsset`
+> 尚未按命名表改为 `SKM_TestRobot` / `SKEL_TestRobot` / `PHYS_TestRobot`（编辑器内 F2 即可）。
 
 ## 在编辑器里移动 / 重命名资产的标准做法
 
