@@ -1,20 +1,35 @@
-# I忽略项目根目录
+# 忽略项目根目录全部内容，下方白名单内的路径才入库
 /*
 
-# 保留unreal项目文件和源资源，白名单
+# Unreal 项目文件与源资源
+!/.gitignore
+!/.gitattributes
+!/.clang-format
+!/.editorconfig
 !/.gitignore
 !/EvilClownParadise.uproject
+!/README.md
 !/Source/
 !/Content/
 !/Config/
 !/Plugins/
 !/docs/
-!/.RiderSetting/
 
-# 插件目录同样只保留源码和配置，避免提交虚幻自动生成的构建产物。
+# Unreal 自动生成的构建产物，一律不入库
 **/Binaries/
 **/Intermediate/
 **/Saved/
 **/DerivedDataCache/
 **/.vs/
 **/.idea/
+
+# IDE 个人设置不入库（Rider 会自动重装 RiderLink，无需提交）
+.RiderSetting/
+Plugins/Developer/
+
+# 商店插件不入库（授权限制再分发；团队各自从 Marketplace 安装）
+Plugins/Marketplace/
+
+# 个人沙盒与本地集合（Developers 目录按 UE 官方约定仅本机使用，不提交）
+Content/Developers/
+Content/Collections/
