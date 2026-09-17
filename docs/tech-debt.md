@@ -96,8 +96,11 @@
 - [x] 删除孤儿 `ABP_ECPCommon`：全仓库零引用，却是**唯一**引用 `/Game/zxx` 的资产；
       删除后 `_Game` 侧 zxx 依赖彻底解除
 - [x] 删除 `_Game/Maps/TestLevel` 重定向器（TestLevel→L_Test 改名留下的空壳）
-- [x] **`Content/Developers` 出库**（`git rm -r --cached`，磁盘保留）；`Content/zxx` 移出磁盘
-      （466MB），`Content` 磁盘占用 518MB → 53MB
+- [x] **`Content/Developers` 出库**（`git rm -r --cached`）并删除本地副本（171 文件 / 50MB）；
+      `Content/zxx` 移出磁盘（466MB / 652 文件）。`Content` 磁盘占用 518MB → 3.1MB、24 个资产。
+      两份内容的完整副本均在 `E:\UnrealProjects\ECP_Archive`（删除前已逐一核对：本地文件
+      全部有归档对应，归档为超集）；删除后重跑 Cook 仍为 `Success - 0 error(s), 0 warning(s)`。
+      注：`Content/Developers/<个人名>/` 仍是约定中的个人沙盒位置，只是历史内容已清空。
 - [x] `.gitignore` 收敛：取消为 `ABP_ECPCommon` 保留的骨架白名单例外
 
 **验收记录**
