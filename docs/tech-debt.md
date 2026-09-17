@@ -123,5 +123,14 @@
 - [ ] **引擎安装目录被重存过**：为修重定向跑过一次 `-run=ResavePackages -FixupRedirectors`，
       该命令未限定范围，连 `D:\UE_5.8\Engine\Content` 也重存了部分包并删除了引擎内未引用的
       重定向器。影响面很小，但建议在 Epic Launcher 里对 UE 5.8 执行一次 **Verify** 恢复引擎文件。
+- [ ] **本地 `.git/lfs` 膨胀约 110MB**：资产迁移过程中反复迭代，每次 `git add` 都为改动过的
+      `.uasset` 生成新的 LFS 对象，本地对象数从 209 涨到 777（`.git/lfs` 53MB → 163MB）。
+      完整内容在 HEAD 里是正确的，这只是本地垃圾。联网后执行：
+      ```bash
+      git lfs prune --dry-run --verbose   # 先看会删什么（当前预估保留 31 个、删除 746 个）
+      git lfs prune                        # 确认后执行
+      ```
+      ⚠️ **离线时不要 prune**：若删掉远端没有、又不被本地 ref 引用的对象，内容无法找回。
+      若决定做 LFS 历史瘦身（`git lfs migrate import --everything`），这一步会被一并覆盖。
 - [ ] **`Config/DefaultEngine.ini` 是编辑器托管文件**：编辑器重写它会丢弃手写注释、
       并写回插件配置段。**"为什么这样配"的理由要写在 `docs/` 里，不要写在 ini 注释里。**
