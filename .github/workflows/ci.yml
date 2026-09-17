@@ -1,0 +1,30 @@
+name: CI
+
+# 自托管 runner：需要一台装好 UE 5.8 的 Windows 常开机器。
+# 设置方法见 docs/ci.md。引擎路径通过 runner 机器上的环境变量 UE_ROOT 注入。
+on:
+  push:
+    branches: [main, ZANEN]
+  pull_request:
+    branches: [main]
+
+jobs:
+  compile-editor:
+    name: 编译 Editor 目标
+    runs-on: [self-hosted, windows, ue5]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+
+      - name: 编译 EvilClownParadiseEditor
+        shell: cmd
+        run: |
+          if "%UE_ROOT%"=="" set UE_ROOT=C:\Program Files\Epic Games\UE_5.8
+          "%UE_ROOT%\Engine\Build\BatchFiles\Build.bat" EvilClownParadiseEditor Win64 Development -project="%GITHUB_WORKSPACE%\EvilClownParadise.uproject" -waitmutex
+
+      - name: 编译 Game 目标（Shipping 前置检查）
+        shell: cmd
+        run: |
+          "%UE_ROOT%\Engine\Build\BatchFiles\Build.bat" EvilClownParadise Win64 Development -project="%GITHUB_WORKSPACE%\EvilClownParadise.uproject" -waitmutex

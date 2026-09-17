@@ -1,0 +1,26 @@
+---
+# 基于 Epic 官方编码标准的 clang-format 配置（UE5 项目通用基准）。
+# Rider/CLion/VS(带 clang-format 扩展) 均原生识别本文件。
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++17
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: ForIndentation
+ColumnLimit: 120
+AccessModifierOffset: -4
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+SortIncludes: Never
+IncludeBlocks: Preserve
+AlignAfterOpenBracket: Align
+SpaceBeforeParens: ControlStatements
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
+FixNamespaceComments: false

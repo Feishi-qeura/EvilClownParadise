@@ -14,6 +14,7 @@
 !/Config/
 !/Plugins/
 !/docs/
+!/.github/
 
 # Unreal 自动生成的构建产物，一律不入库
 **/Binaries/
