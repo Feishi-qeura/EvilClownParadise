@@ -12,7 +12,10 @@ class UInputMappingContext;
 class UEnhancedInputLocalPlayerSubsystem;
 struct FInputActionValue;
 
-// 每个输入动作使用独立属性；蓝图配置资源，C++ 逐项绑定处理函数。
+/**
+ * 玩家控制器：把 Enhanced Input 动作逐项绑到 C++ 处理函数，资源在蓝图类默认值里指定。
+ * 每个动作使用独立属性，蓝图换资源不需要改 C++ 路径。
+ */
 UCLASS()
 class EVILCLOWNPARADISE_API AECPPlayerController : public APlayerController
 {
@@ -38,8 +41,8 @@ public:
 	// 跳跃开始时提出请求，松开或取消时停止持续跳跃；未配置时不启用。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> JumpAction;
-	
-	UPROPERTY(EditDefaultsOnly , BlueprintReadOnly, Category = "ECP|Input")
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> SprintAction;
 
 	// 默认与原 AddMappingContext 节点一致，数值越大优先级越高。
@@ -57,7 +60,7 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	// 控制器的输入绑定入口，保留父类初始化。
 	virtual void SetupInputComponent() override;
-	
+
 private:
 	// 回调始终获取当前 Pawn，避免重生后继续访问旧角色。
 	void Move(const FInputActionValue& Value);
@@ -65,10 +68,10 @@ private:
 	// 不会补发一个值为 0 的 Triggered，不归零的话 MoveInput 会一直停在最后一次的值。
 	void StopMove();
 	void Look(const FInputActionValue& Value);
-	
+
 	void StartCrouch();
 	void StopCrouch();
-	
+
 	void StartSprint();
 	void StopSprint();
 

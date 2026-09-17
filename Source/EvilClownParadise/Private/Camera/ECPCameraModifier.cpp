@@ -1,6 +1,5 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
-
 #include "Camera/ECPCameraModifier.h"
 
 #include "Camera/CameraTypes.h"
@@ -12,24 +11,24 @@
 
 namespace
 {
-	// 抖动噪声的采样通道常量（和 Godot 的 _apply_rig 一致）。
-	// 用不同的通道坐标把各轴去相关，否则六路会同步抖成一条直线。
-	//
-	// 旋转用 FRotator 的三个分量，没有轴向歧义：
-	constexpr float ShakeChannelPitch = 11.f;
-	constexpr float ShakeChannelYaw = 37.f;
-	constexpr float ShakeChannelRoll = 73.f;
-	// 位移要注意轴向：Godot 的源顺序是 (x=左右, y=上下, z=前后)，
-	// 这里按 UE 轴向重新命名，免得再犯"Y 到底是上下还是左右"的错。
-	constexpr float ShakeChannelRight = 101.f;    // Godot 的 x
-	constexpr float ShakeChannelUp = 131.f;       // Godot 的 y
-	constexpr float ShakeChannelForward = 167.f;  // Godot 的 z
+// 抖动噪声的采样通道常量（和 Godot 的 _apply_rig 一致）。
+// 用不同的通道坐标把各轴去相关，否则六路会同步抖成一条直线。
+//
+// 旋转用 FRotator 的三个分量，没有轴向歧义：
+constexpr float ShakeChannelPitch = 11.f;
+constexpr float ShakeChannelYaw = 37.f;
+constexpr float ShakeChannelRoll = 73.f;
+// 位移要注意轴向：Godot 的源顺序是 (x=左右, y=上下, z=前后)，
+// 这里按 UE 轴向重新命名，免得再犯"Y 到底是上下还是左右"的错。
+constexpr float ShakeChannelRight = 101.f;   // Godot 的 x
+constexpr float ShakeChannelUp = 131.f;      // Godot 的 y
+constexpr float ShakeChannelForward = 167.f; // Godot 的 z
 
-	FORCEINLINE float NoiseAt(float Channel, float T)
-	{
-		// UE 的是 Perlin，Godot 那边是 Simplex。作为抖动源观感一致，不需要逐值对齐。
-		return FMath::PerlinNoise2D(FVector2D(Channel, T));
-	}
+FORCEINLINE float NoiseAt(float Channel, float T)
+{
+	// UE 的是 Perlin，Godot 那边是 Simplex。作为抖动源观感一致，不需要逐值对齐。
+	return FMath::PerlinNoise2D(FVector2D(Channel, T));
+}
 }
 
 float UECPCameraModifier::ExpInterp(float Current, float Target, float DeltaTime, float Rate)
@@ -40,10 +39,7 @@ float UECPCameraModifier::ExpInterp(float Current, float Target, float DeltaTime
 	return FMath::Lerp(Current, Target, 1.f - FMath::Exp(-Rate * DeltaTime));
 }
 
-void UECPCameraModifier::AddTrauma(float Amount)
-{
-	Trauma = FMath::Clamp(FMath::Max(Trauma, Amount), 0.f, 1.f);
-}
+void UECPCameraModifier::AddTrauma(float Amount) { Trauma = FMath::Clamp(FMath::Max(Trauma, Amount), 0.f, 1.f); }
 
 AECPPlayerBase* UECPCameraModifier::GetViewPlayer() const
 {
@@ -118,7 +114,7 @@ void UECPCameraModifier::DetectJumpAndLand(AECPPlayerBase* Player)
 		// 加垂直速度条件是排除"走下平台"（那种情况垂直速度是负的）
 		if (bNowInAir && !bPrevInAir && Player->GetVelocity().Z > 0.f)
 		{
-			Kick.Z += JumpKickHeight;   // UE: Z = 上下
+			Kick.Z += JumpKickHeight; // UE: Z = 上下
 			KickPitch += JumpKickPitchDegrees;
 		}
 
@@ -128,12 +124,12 @@ void UECPCameraModifier::DetectJumpAndLand(AECPPlayerBase* Player)
 		// PeakFallSpeed 在落地后仍然保留（下次进入下落时才清零），这里可以安全读。
 		if (bPrevInAir && !bNowInAir && Move->PeakFallSpeed >= LandKickMinImpact)
 		{
-			const float Scale = FMath::Clamp(
-				FMath::GetRangePct(LandKickImpactMin, LandKickImpactMax, Move->PeakFallSpeed),
-				LandKickScaleMin, LandKickScaleMax);
+			const float Scale =
+			    FMath::Clamp(FMath::GetRangePct(LandKickImpactMin, LandKickImpactMax, Move->PeakFallSpeed),
+			                 LandKickScaleMin, LandKickScaleMax);
 
-			Kick.Z -= LandKickDepth * Scale;                            // UE: Z = 上下（下压）
-			Kick.Y += FMath::FRandRange(-0.5f, 0.5f) * 0.6f * Scale;    // UE: Y = 左右（Godot: (rand-0.5)*0.006 m）
+			Kick.Z -= LandKickDepth * Scale;                         // UE: Z = 上下（下压）
+			Kick.Y += FMath::FRandRange(-0.5f, 0.5f) * 0.6f * Scale; // UE: Y = 左右（Godot: (rand-0.5)*0.006 m）
 			KickPitch -= LandKickPitchDegrees * Scale;
 		}
 	}
@@ -192,12 +188,12 @@ void UECPCameraModifier::TickLayers(float DeltaTime, AECPPlayerBase* Player, con
 		else
 		{
 			// 走~跑之间连续混合（Godot: inverse_lerp(walk*0.4, run, speed)）
-			const float AmpAlpha = FMath::Clamp(
-				(Speed2D - WalkSpeed * 0.4f) / FMath::Max(RunSpeed - WalkSpeed * 0.4f, 1.f), 0.f, 1.f);
+			const float AmpAlpha =
+			    FMath::Clamp((Speed2D - WalkSpeed * 0.4f) / FMath::Max(RunSpeed - WalkSpeed * 0.4f, 1.f), 0.f, 1.f);
 			TargetAmp = FMath::Lerp(BobWalk, BobRun, AmpAlpha);
 
-			const float IntervalAlpha = FMath::Clamp(
-				(Speed2D - WalkSpeed) / FMath::Max(RunSpeed - WalkSpeed, 1.f), 0.f, 1.f);
+			const float IntervalAlpha =
+			    FMath::Clamp((Speed2D - WalkSpeed) / FMath::Max(RunSpeed - WalkSpeed, 1.f), 0.f, 1.f);
 			Interval = FMath::Lerp(BobIntervalWalk, BobIntervalSprint, IntervalAlpha);
 		}
 
@@ -215,8 +211,7 @@ void UECPCameraModifier::TickLayers(float DeltaTime, AECPPlayerBase* Player, con
 	// ---------------- 侧移倾斜 ----------------
 	// Godot 取的是"角色本地空间前进方向"的横向分量；UE 里 MoveInput.Y 就是它。
 	// 注意：Godot 在本地的 wish_dir 长度为 0 时把 wish_x 当 0，所以直接读输入即可。
-	float TargetRoll = -Player->MoveInput.Y * StrafeRollDegrees
-		* FMath::Clamp(Speed2D / WalkSpeed, 0.f, 1.f);
+	float TargetRoll = -Player->MoveInput.Y * StrafeRollDegrees * FMath::Clamp(Speed2D / WalkSpeed, 0.f, 1.f);
 	if (!bGrounded)
 	{
 		TargetRoll *= StrafeRollAirScale;
@@ -294,14 +289,13 @@ void UECPCameraModifier::ApplyLayersToPOV(FMinimalViewInfo& InOutPOV)
 	//   上下 2 次（abs(sin) 的周期是 π —— 一步一次，和脚步音对齐）
 	// 注意别写成 abs(sin(BobPhase * 2))：那会变成 4 次/步幅，
 	// 和"每步一声"的脚步音对不上（耳朵听 2 次、镜头颠 4 次）。
-	const FVector Bob(
-		0.f,                                              // 前后
-		FMath::Sin(BobPhase) * BobAmp.X,                  // 左右
-		FMath::Abs(FMath::Sin(BobPhase)) * BobAmp.Y);     // 上下
+	const FVector Bob(0.f,                                          // 前后
+	                  FMath::Sin(BobPhase) * BobAmp.X,              // 左右
+	                  FMath::Abs(FMath::Sin(BobPhase)) * BobAmp.Y); // 上下
 
 	// ---- 抖动：幅度按 trauma²（高 trauma 强烈、低 trauma 迅速平息）----
 	FVector ShakePos = FVector::ZeroVector;
-	FVector ShakeRot = FVector::ZeroVector;   // 度：X=俯仰 Y=偏航 Z=横滚
+	FVector ShakeRot = FVector::ZeroVector; // 度：X=俯仰 Y=偏航 Z=横滚
 	if (Trauma > 0.f)
 	{
 		const float S = Trauma * Trauma;

@@ -218,18 +218,18 @@ public:
 
 private:
 	// ---- 运行时状态 ----
-	float SmoothedEyeHeight = -1.f;      // 负值 = 未初始化
+	float SmoothedEyeHeight = -1.f; // 负值 = 未初始化
 	float SmoothedFOV = -1.f;
 	float BobPhase = 0.f;
 	FVector2D BobAmp = FVector2D::ZeroVector;
 	/** 冲击位移，cm，相机局部空间。UE 轴向：X=前后 Y=左右 Z=上下 */
 	FVector Kick = FVector::ZeroVector;
-	float KickPitch = 0.f;               // 度
-	float KickRoll = 0.f;                // 度
-	float Roll = 0.f;                    // 度
+	float KickPitch = 0.f; // 度
+	float KickRoll = 0.f;  // 度
+	float Roll = 0.f;      // 度
 	float Trauma = 0.f;
 	float NoiseTime = 0.f;
-	int32 PrevMovementState = -1;        // 缓存的 EECPMovementState，用于边沿检测
+	int32 PrevMovementState = -1; // 缓存的 EECPMovementState，用于边沿检测
 
 	/** 取当前被观察的本项目角色；取不到返回 null */
 	AECPPlayerBase* GetViewPlayer() const;

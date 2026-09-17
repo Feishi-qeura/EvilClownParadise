@@ -1,6 +1,11 @@
 ---
 # 基于 Epic 官方编码标准的 clang-format 配置（UE5 项目通用基准）。
 # Rider/CLion/VS(带 clang-format 扩展) 均原生识别本文件。
+#
+# 注意：本文件必须描述"代码实际长什么样"，而不是我们希望它长什么样。
+# 之前 BreakBeforeBraces/PointerAlignment 两项与代码相反（配置 Attach/Right，
+# 代码实际是 Allman/Left），导致跑一次 clang-format 会把所有文件改写成另一套风格。
+# 改动这两项前，先确认是有意全库重排风格。
 Language: Cpp
 BasedOnStyle: LLVM
 Standard: c++17
@@ -11,9 +16,10 @@ UseTab: ForIndentation
 ColumnLimit: 120
 AccessModifierOffset: -4
 
-PointerAlignment: Right
+# Epic 风格：指针/引用贴着类型（ACharacter* Pawn），花括号另起一行
+PointerAlignment: Left
 DerivePointerAlignment: false
-BreakBeforeBraces: Attach
+BreakBeforeBraces: Allman
 AllowShortFunctionsOnASingleLine: All
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false

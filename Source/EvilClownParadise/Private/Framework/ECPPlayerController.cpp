@@ -1,6 +1,6 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
-#include "Data/ECPPlayerController.h"
+#include "Framework/ECPPlayerController.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Engine/LocalPlayer.h"
@@ -18,18 +18,18 @@ DEFINE_LOG_CATEGORY_STATIC(LogECPPlayerInput, Log, All);
 void AECPPlayerController::BeginPlay()
 {
 	Super::BeginPlay();
-	
+
 	// 避免把远程玩家的映射装到玩家 0，使用当前控制器的本地玩家。
 	if (!IsLocalController())
 	{
 		return;
 	}
-	
+
 	if (PlayerCameraManager)
 	{
-		PlayerCameraManager -> AddNewCameraModifier(UECPCameraModifier::StaticClass());
+		PlayerCameraManager->AddNewCameraModifier(UECPCameraModifier::StaticClass());
 	}
-	
+
 	ULocalPlayer* LocalPlayer = GetLocalPlayer();
 	// 资源未配置时明确报告，方便在蓝图类默认值中补齐。
 	if (!LocalPlayer || !InputMapping)
@@ -38,7 +38,8 @@ void AECPPlayerController::BeginPlay()
 		return;
 	}
 
-	UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(LocalPlayer);
+	UEnhancedInputLocalPlayerSubsystem* Subsystem =
+	    ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(LocalPlayer);
 	// 非游戏环境下子系统可能不可用，不能解引用空对象。
 	if (!Subsystem)
 	{
@@ -67,10 +68,11 @@ void AECPPlayerController::SetupInputComponent()
 	// 普通 InputComponent 无法绑定增强输入，需要检查项目默认输入组件。
 	if (!EnhancedInput)
 	{
-		UE_LOG(LogECPPlayerInput, Error, TEXT("%s: Default Input Component Class must be EnhancedInputComponent."), *GetName());
+		UE_LOG(LogECPPlayerInput, Error, TEXT("%s: Default Input Component Class must be EnhancedInputComponent."),
+		       *GetName());
 		return;
 	}
-	
+
 	// 单独验证移动资源，避免错误的值类型进入 FVector2D 读取。
 	if (MoveAction && MoveAction->ValueType == EInputActionValueType::Axis2D)
 	{
@@ -98,14 +100,15 @@ void AECPPlayerController::SetupInputComponent()
 	if (CrouchAction)
 	{
 		EnhancedInput->BindAction(CrouchAction.Get(), ETriggerEvent::Started, this, &AECPPlayerController::StartCrouch);
-		EnhancedInput->BindAction(CrouchAction.Get(), ETriggerEvent::Completed, this, &AECPPlayerController::StopCrouch);
+		EnhancedInput->BindAction(CrouchAction.Get(), ETriggerEvent::Completed, this,
+		                          &AECPPlayerController::StopCrouch);
 		EnhancedInput->BindAction(CrouchAction.Get(), ETriggerEvent::Canceled, this, &AECPPlayerController::StopCrouch);
 	}
 	else
 	{
 		UE_LOG(LogECPPlayerInput, Warning, TEXT("%s: CrouchAction is missing."), *GetName());
 	}
-	
+
 	// 跳跃允许暂不配置；配置后同时处理按下、松开和取消，避免残留按住状态。
 	if (JumpAction)
 	{
@@ -117,11 +120,12 @@ void AECPPlayerController::SetupInputComponent()
 	{
 		UE_LOG(LogECPPlayerInput, Warning, TEXT("%s: JumpAction is missing."), *GetName());
 	}
-	
+
 	if (SprintAction)
 	{
 		EnhancedInput->BindAction(SprintAction.Get(), ETriggerEvent::Started, this, &AECPPlayerController::StartSprint);
-		EnhancedInput->BindAction(SprintAction.Get(), ETriggerEvent::Completed, this, &AECPPlayerController::StopSprint);
+		EnhancedInput->BindAction(SprintAction.Get(), ETriggerEvent::Completed, this,
+		                          &AECPPlayerController::StopSprint);
 		EnhancedInput->BindAction(SprintAction.Get(), ETriggerEvent::Canceled, this, &AECPPlayerController::StopSprint);
 	}
 	else
@@ -143,13 +147,13 @@ void AECPPlayerController::Move(const FInputActionValue& Value)
 	const FVector2D Axis = Value.Get<FVector2D>();
 	ControlledPawn->AddMovementInput(ControlledPawn->GetActorForwardVector(), Axis.X);
 	ControlledPawn->AddMovementInput(ControlledPawn->GetActorRightVector(), Axis.Y);
-	
+
 	if (AECPPlayerBase* ECPPlayer = Cast<AECPPlayerBase>(ControlledPawn))
 	{
 		// 夹到长度 1：UE 的 2D 轴在斜向（W+D）会给 (1,1)，长度 1.41；
 		// 而 Godot 的 Input.get_vector 是归一化的（给 0.707）。
 		// 不夹的话侧移倾斜在斜向会大 41%。（移动本身不受影响，CMC 会把加速度钳到 1）
-		ECPPlayer -> MoveInput = Axis.GetClampedToMaxSize(1.0f);
+		ECPPlayer->MoveInput = Axis.GetClampedToMaxSize(1.0f);
 	}
 }
 
@@ -161,7 +165,7 @@ void AECPPlayerController::StopMove()
 {
 	if (AECPPlayerBase* ECPPlayer = GetPawn<AECPPlayerBase>())
 	{
-		ECPPlayer -> MoveInput = FVector2D::ZeroVector;
+		ECPPlayer->MoveInput = FVector2D::ZeroVector;
 	}
 }
 
@@ -184,7 +188,7 @@ void AECPPlayerController::StartCrouch()
 {
 	if (AECPPlayerBase* ECPPlayer = GetPawn<AECPPlayerBase>())
 	{
-		ECPPlayer ->bWantsToCrouch = true;	
+		ECPPlayer->bWantsToCrouch = true;
 	}
 }
 
@@ -192,7 +196,7 @@ void AECPPlayerController::StopCrouch()
 {
 	if (AECPPlayerBase* ECPPlayer = GetPawn<AECPPlayerBase>())
 	{
-		ECPPlayer ->bWantsToCrouch = false;
+		ECPPlayer->bWantsToCrouch = false;
 	}
 }
 
@@ -200,7 +204,7 @@ void AECPPlayerController::StartSprint()
 {
 	if (AECPPlayerBase* ECPPlayer = GetPawn<AECPPlayerBase>())
 	{
-		ECPPlayer ->bWantsToSprint = true;
+		ECPPlayer->bWantsToSprint = true;
 	}
 }
 
@@ -208,31 +212,31 @@ void AECPPlayerController::StopSprint()
 {
 	if (AECPPlayerBase* ECPPlayer = GetPawn<AECPPlayerBase>())
 	{
-		ECPPlayer ->bWantsToSprint = false;
+		ECPPlayer->bWantsToSprint = false;
 	}
 }
 
-//Character负责检查能否跳跃；控制器只提出跳跃请求。
+// Character负责检查能否跳跃；控制器只提出跳跃请求。
 void AECPPlayerController::StartJump()
 {
 	AECPPlayerBase* ECPPlayer = GetPawn<AECPPlayerBase>();
-	//没有角色或正在旁观时不能请求 Character 跳跃。
+	// 没有角色或正在旁观时不能请求 Character 跳跃。
 	if (!IsValid(ECPPlayer))
 	{
 		return;
 	}
 
-	//清理上一次记录的跳跃请求，避免换角色后原角色仍保持按住状态。
+	// 清理上一次记录的跳跃请求，避免换角色后原角色仍保持按住状态。
 	JumpingCharacter.Reset();
-	
+
 	JumpingCharacter = ECPPlayer;
-	ECPPlayer -> RequestJump();
+	ECPPlayer->RequestJump();
 }
 
-//松开或取消动作都清理按住状态，允许 Character 结束可变高度跳跃。
+// 松开或取消动作都清理按住状态，允许 Character 结束可变高度跳跃。
 void AECPPlayerController::StopJump()
 {
-	//使用开始跳跃时记录的角色：换 Pawn 后松开按键，清理的是原角色，不会误伤新 Pawn。
+	// 使用开始跳跃时记录的角色：换 Pawn 后松开按键，清理的是原角色，不会误伤新 Pawn。
 	if (AECPPlayerBase* ECPPlayer = Cast<AECPPlayerBase>(JumpingCharacter.Get()))
 	{
 		ECPPlayer->ReleaseJump();
@@ -241,16 +245,16 @@ void AECPPlayerController::StopJump()
 	JumpingCharacter.Reset();
 }
 
-//控制器退出时释放本类安装的映射，防止返回菜单后残留角色输入。
+// 控制器退出时释放本类安装的映射，防止返回菜单后残留角色输入。
 void AECPPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	//退出时不一定再收到输入结束事件，因此主动清理跳跃请求。
+	// 退出时不一定再收到输入结束事件，因此主动清理跳跃请求。
 	StopJump();
 
-	//本地玩家可能已先销毁，只有弱引用仍有效时才操作子系统。
+	// 本地玩家可能已先销毁，只有弱引用仍有效时才操作子系统。
 	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = InputSubsystem.Get())
 	{
-		//仅移除本类记录的映射，不影响其他功能的输入上下文。
+		// 仅移除本类记录的映射，不影响其他功能的输入上下文。
 		if (InstalledInputMapping)
 		{
 			Subsystem->RemoveMappingContext(InstalledInputMapping.Get());
