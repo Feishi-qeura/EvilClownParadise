@@ -9,6 +9,11 @@
 | `Content/Collections/` | 本地资产集合（UE 本机数据） | ❌ 不入库 |
 | `Content/zxx/` | 学习/演示素材 | ❌ 不入库，且已从磁盘移出 |
 
+> ⚠️ **`Content/Developers` 删不掉，不要试图删。** UE 会在编辑器启动时自动重建
+> `Content/Developers/<当前用户名>/Collections`（实测：删掉整个目录后跑一次编辑器即恢复；
+> 引擎的 `DisplayDevelopersFolder` 设置只控制 Content Browser 里是否显示，不控制磁盘创建）。
+> 让它不进仓库的正确手段就是下面这条 `.gitignore` 规则——已生效，跟踪数为 0。
+
 > ⚠️ **gitignore 不能撤销已跟踪文件。** `Content/Developers` 曾被 `.gitignore` 忽略，但文件
 > 早已跟踪，规则对已跟踪文件无效——结果"文档说不入库、实际入库 171 个"。让目录真正出库
 > 只有一条路：`git rm -r --cached <路径>`（磁盘文件保留）。
