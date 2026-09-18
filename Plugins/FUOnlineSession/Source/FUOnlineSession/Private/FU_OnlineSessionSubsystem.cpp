@@ -1,4 +1,5 @@
 #include "FU_OnlineSessionSubsystem.h"
+#include "FU_SessionPingQuery.h"
 //模板通过ProviderTraits取得Steam/NULL的固定特化版本
 #include "ProviderTraits/FU_OnlineSessionProviderTraits.h"
 #include "FU_OnlineSessionMetadata.h"
@@ -3920,3 +3921,11 @@ void UFU_OnlineSessionSubsystem::DestroyLanSession()
 	FU_DestroySession<EFU_OnlineProvider::Lan>();
 }
 //***************************************************************************
+
+int32 UFU_OnlineSessionSubsystem::GetSessionPing(
+	const EFU_OnlineProvider Provider, const FString& SessionId, bool& bIsEstimated) const
+{
+	// 直接读取搜索/清理流程维护的两份缓存，避免为房间列表维护另一份会过期的 Ping 状态。
+	return FUOnlineSession::GetCachedSessionPing(
+		SteamState.CachedSearchResults, LanState.CachedSearchResults, Provider, SessionId, bIsEstimated);
+}

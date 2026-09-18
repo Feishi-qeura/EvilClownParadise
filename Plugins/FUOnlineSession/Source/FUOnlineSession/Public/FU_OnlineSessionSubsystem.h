@@ -63,6 +63,15 @@ public:
 	FFU_OnlineProviderStatus CheckLanProviderStatus() const;
 
 	/**
+	 * 读取最近一次搜索中指定房间的 Ping（毫秒），无需加入房间或额外发包。
+	 * 找不到房间、非法 Provider 或无有效 Ping 时统一返回 999，便于 UI 直接显示 999ms。
+	 * bIsEstimated 仅在有效 Steam 结果时为 true；刷新搜索才会更新缓存中的数值。
+	 */
+	UFUNCTION(BlueprintPure, Category="FUOnlineSession|Online Session|Status", meta=(DisplayName="Get Session Ping", ReturnDisplayName="PingMs"))
+	int32 GetSessionPing(EFU_OnlineProvider Provider, const FString& SessionId, bool& bIsEstimated) const;
+
+
+	/**
 	 * 返回本 GameInstance 的有界、已脱敏诊断历史。
 	 * 该数组是副本，Blueprint 不会修改 Runtime 内部的故障调查记录。
 	 */
