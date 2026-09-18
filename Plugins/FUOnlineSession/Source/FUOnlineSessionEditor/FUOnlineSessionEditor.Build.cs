@@ -12,6 +12,8 @@ public class FUOnlineSessionEditor : ModuleRules
             "CoreUObject",
             "Engine",
             "Projects",
+            // Ping 回归测试直接使用 IP 连接对象，需要链接其类型注册代码。
+            "OnlineSubsystemUtils",
 
             // 监听 UDeveloperSettings 的变更，并在编辑器中显示非阻塞通知。
             "DeveloperSettings",

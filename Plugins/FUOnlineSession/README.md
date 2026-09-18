@@ -74,6 +74,36 @@ LAN/NULL：
 
 搜索结果自带 `Provider` 和 `SessionId`。加入时必须把用户选择结果的 `SessionId` 交给相同 Provider 的 Join 节点，不能把 Steam 结果交给 LAN，反之亦然。
 
+## 加入前查询房间 Ping
+
+取得 `FU Online Session Subsystem`，在 `OnFindSessionCompleteV2` 成功后，将目标结果的 `Provider` 和 `SessionId` 传入纯函数 `Get Session Ping`：
+
+- `PingMs`：最近一次搜索缓存里的延迟，单位毫秒；可直接拼接 `ms` 显示。
+- 找不到房间、空 ID、非法 Provider、无效原生结果、负 Ping 或 UE 的 `9999` 等不可用值，统一返回 **999**。
+- 有效 Ping 原样返回，保留有效的 `0ms` 和 `1200ms` 等数值；不会把真实高延迟截断成 999。
+- `Is Estimated`：有效 Steam 结果为 true，表示 SteamSockets 中继线路估算；LAN 和兜底值为 false。
+- 本函数只查缓存，不加入房间、不发探测包、不创建 timer。重复调用不会重新测速；再次搜索才更新数据。查询不到并不单独返回“未知”或“未找到”状态。
+
+`Provider` 必须与搜索结果一致；两个 Provider 的缓存相互独立。开始下一次搜索会清空该 Provider 的旧缓存，因此请在新一轮搜索成功回调后更新房间列表。返回值用于显示搜索时的延迟，不保证房间此刻仍在线。
+
+专项测试入口：`Automation RunTests FUOnlineSession.SessionPing`。
+
+## 持续 Ping 监测
+
+在已进入联网地图的客户端调用一次 `FU_CheckSessionStatus(WorldContextObject, RefreshTime)`，例如 `RefreshTime=1.0` 表示每秒更新。无需在 Tick 中重复创建节点；每次调用都会创建一个独立监测器。
+
+- 单机、Listen Server 房主、Dedicated Server：仅触发一次 `On Server(0)`。
+- 远端客户端：就绪后立即触发 `On Client(PingValue)`，随后按刷新间隔持续触发；Ping 单位为毫秒。
+- 初始化时 PC、PlayerState 或连接尚未就绪：允许等待，使用当前 NetDriver 的 `InitialConnectTimeout`。
+- 首次成功采样后，状态短暂缺失：使用 `ConnectionTimeout` 宽限，恢复后继续更新。就绪等待没有有效配置时使用 30 秒。
+- 持续未收包：比较 NetDriver 时钟与连接的 `LastReceiveTime`，使用连接的 `GetTimeoutValue()` 判断；遵循开发用的 `bNoTimeouts`。
+- 本 World 的游戏连接明确失败或等待超时：仅触发一次 `Client Connection Overtime(0)` 并结束监测。单次高 Ping 不直接等同断线。
+- 正常切图或结束 PIE：静默清理 timer、网络事件监听和 GameInstance 保活；需要在新 World 再次调用。菜单中的单机节点不会自动转换为加入房间后的客户端节点。
+
+节点在游戏线程定时读取 UE 已有 Ping 数据，不额外发送探测包。每帧最多执行一次定时采样，避免长帧补发；它仍受 World 定时器的暂停、时间缩放和游戏线程调度影响，不提供独立线程的实时心跳保证。`RefreshTime` 必须是有限正数，只决定采样频率；采样型超时在下一次 timer 回调检测，明确的网络失败事件会直接结束监测。
+
+自动化测试入口：`Automation RunTests FUOnlineSession.Ping`。真实网络验收还应在 LAN/Steam 两端检查客户端连续更新、短时丢包恢复、持续断网仅一次超时、切图后重新启动及房主一次输出。
+
 ## Steam 搜索语义
 
 `bWasSuccessful=true` 只表示 Steam 已正常完成查询，不表示一定存在房间。插件按以下顺序搜索：
