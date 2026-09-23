@@ -77,10 +77,13 @@ bool FECPPickupItemRotationSpeedMultiplierTest::RunTest(const FString& Parameter
 		SpeedProperty->HasAllPropertyFlags(CPF_Edit | CPF_DisableEditOnInstance));
 	TestTrue(TEXT("旋转速度倍率对蓝图可见"),
 		SpeedProperty->HasAnyPropertyFlags(CPF_BlueprintVisible));
+	// Game 构建不保留编辑器元数据，仅在接口可用时验证编辑范围，运行时倍率断言仍完整执行。
+#if WITH_METADATA
 	TestEqual(TEXT("编辑器最小倍率保持为 0.1"),
 		SpeedProperty->GetMetaData(TEXT("ClampMin")), FString(TEXT("0.1")));
 	TestEqual(TEXT("编辑器最大倍率保持为 10.0"),
 		SpeedProperty->GetMetaData(TEXT("ClampMax")), FString(TEXT("10.0")));
+#endif
 
 	const FRotator RotationDelta(1.f, -2.f, 0.5f);
 	// 直接调用公开入口验证真实 C++ 行为，避免 ProcessEvent 参数布局影响数值断言。

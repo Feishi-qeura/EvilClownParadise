@@ -9,6 +9,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
+#include "UObject/Script.h"
 #include "UObject/UnrealType.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FECPRagdollReplicationOrderingTest,
@@ -73,6 +74,8 @@ bool FECPRagdollReplicationOrderingTest::RunTest(const FString& Parameters)
             State->Sequence = Sequence;
             State->ServerTime = static_cast<double>(Sequence);
             State->Frame = Frame;
+            // 自动化测试未运行 PIE，需要临时允许编辑器脚本执行，确保真正调用生产 RepNotify。
+            FEditorScriptExecutionGuard ScriptGuard;
             Client->ProcessEvent(Notify, nullptr);
         };
 
