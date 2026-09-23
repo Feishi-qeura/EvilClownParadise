@@ -38,6 +38,7 @@ private:
 	using time_t = std::chrono::milliseconds;
 
 	static size_t INITIAL_CAPACITY;
+	static size_t DEFAULT_CHUNK_SIZE;
 
 	std::recursive_mutex lock;
 	std::condition_variable_any cv;
@@ -52,6 +53,7 @@ private:
 	std::thread::id async_thread_id;
 	std::future<void> async_future;
 
+	size_t chunk_size = DEFAULT_CHUNK_SIZE;
 	std::vector<Buffer::ByteArray> data;
 	std::mutex queue_lock;
 	std::deque<Buffer::ByteArray> queue{};
@@ -69,7 +71,7 @@ private:
 public:
 	// region ctor/dtor
 
-	explicit ByteBufferAsyncProcessor(std::string id, std::function<bool(Buffer::ByteArray const&, sequence_number_t)> processor);
+	explicit ByteBufferAsyncProcessor(std::string id, std::function<bool(Buffer::ByteArray const&, sequence_number_t)> processor, size_t chunk_size = DEFAULT_CHUNK_SIZE);
 
 	// endregion
 private:
@@ -78,6 +80,8 @@ private:
 	bool terminate0(time_t timeout, StateKind state_to_set, string_view action);
 
 	void add_data(std::vector<Buffer::ByteArray>&& new_data);
+
+	void cleanup_pending_queue();
 
 	bool reprocess();
 

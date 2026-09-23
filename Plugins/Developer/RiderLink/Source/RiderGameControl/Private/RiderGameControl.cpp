@@ -3,9 +3,9 @@
 
 #include "IRiderLink.hpp"
 
-#include "Model/Library/UE4Library/PlayState.Pregenerated.h"
-#include "Model/Library/UE4Library/RequestFailed.Pregenerated.h"
-#include "Model/Library/UE4Library/RequestSucceed.Pregenerated.h"
+#include "UE4Library/PlayState.Pregenerated.h"
+#include "UE4Library/RequestFailed.Pregenerated.h"
+#include "UE4Library/RequestSucceed.Pregenerated.h"
 #include "RdEditorModel/RdEditorModel.Pregenerated.h"
 
 #include "Async/Async.h"
@@ -26,6 +26,27 @@
 #else
 #include "IAssetViewport.h"
 #include "EditorViewportClient.h"
+#endif
+
+// In UE 6.0 the classic FEditorDelegates::{Begin,End,Pause,Resume,SingleStep}PIE members were
+// relocated out of UnrealEd's Editor.h into Engine's Editor/EditorEngineDelegates.h under the
+// UE::Editor::PIE namespace and renamed to On{Begin,End,Pause,Resume,SingleStep}. The old
+// FEditorDelegates:: spellings are removed (not just deprecated), so we must switch APIs by
+// engine version. See RIDER-140269 and UE commit a97bedd11cda ("Decouple: relocate the
+// runtime-relevant FEditorDelegates members out of UnrealEd's Editor.h into Engine.").
+#if ENGINE_MAJOR_VERSION >= 6
+    #include "Editor/EditorEngineDelegates.h"
+    #define RIDERLINK_PIE_BEGIN   UE::Editor::PIE::OnBegin
+    #define RIDERLINK_PIE_END     UE::Editor::PIE::OnEnd
+    #define RIDERLINK_PIE_PAUSE   UE::Editor::PIE::OnPause
+    #define RIDERLINK_PIE_RESUME  UE::Editor::PIE::OnResume
+    #define RIDERLINK_PIE_STEP    UE::Editor::PIE::OnSingleStep
+#else
+    #define RIDERLINK_PIE_BEGIN   FEditorDelegates::BeginPIE
+    #define RIDERLINK_PIE_END     FEditorDelegates::EndPIE
+    #define RIDERLINK_PIE_PAUSE   FEditorDelegates::PausePIE
+    #define RIDERLINK_PIE_RESUME  FEditorDelegates::ResumePIE
+    #define RIDERLINK_PIE_STEP    FEditorDelegates::SingleStepPIE
 #endif
 
 #define LOCTEXT_NAMESPACE "RiderGameControl"
@@ -96,6 +117,10 @@ struct FPlaySettings
     int32 NumberOfClients;
     bool bNetDedicated;
     bool bSpawnAtPlayerStart;
+    // Newer fields driven by RdPlaySettings signal — legacy packed-int callers leave them at defaults.
+    EPlayNetMode NetMode = EPlayNetMode::PIE_Standalone;
+    bool bRunUnderOneProcess = true;
+    bool bApplyNetMode = false;             // only write NetMode/RunUnderOneProcess if set via struct path
 
     static FPlaySettings UnpackFromMode(int32_t mode)
     {
@@ -105,6 +130,20 @@ struct FPlaySettings
             DedicatedServer(mode),
             SpawnAtPlayerStart(mode),
         };
+        return settings;
+    }
+
+    static FPlaySettings FromRdStruct(const JetBrains::EditorPlugin::PlaySettings& rd)
+    {
+        FPlaySettings settings;
+        settings.PlayMode = PlayModeFromInt(rd.get_playMode());
+        settings.NumberOfClients = rd.get_numberOfClients();
+        settings.bNetDedicated = rd.get_dedicatedServer();
+        settings.bSpawnAtPlayerStart = rd.get_spawnAtPlayerStart();
+        // rd::PlayNetMode { Standalone=0, ListenServer=1, Client=2 } maps to EPlayNetMode {PIE_Standalone=0, PIE_ListenServer=1, PIE_Client=2}.
+        settings.NetMode = static_cast<EPlayNetMode>(static_cast<int>(rd.get_netMode()));
+        settings.bRunUnderOneProcess = rd.get_runUnderOneProcess();
+        settings.bApplyNetMode = true;
         return settings;
     }
 
@@ -138,7 +177,7 @@ static FPlaySettings RetrieveSettings(const ULevelEditorPlaySettings* PlayInSett
 static void UpdateSettings(ULevelEditorPlaySettings* PlayInSettings, const FPlaySettings& settings)
 {
     check(PlayInSettings);
-    
+
     PlayInSettings->SetPlayNumberOfClients(settings.NumberOfClients);
 #if ENGINE_MAJOR_VERSION == 4 && ENGINE_MINOR_VERSION <= 24
     PlayInSettings->SetPlayNetDedicated(settings.bNetDedicated);
@@ -150,6 +189,15 @@ static void UpdateSettings(ULevelEditorPlaySettings* PlayInSettings, const FPlay
             ? PlayLocation_DefaultPlayerStart
             : PlayLocation_CurrentCameraLocation;
     PlayInSettings->LastExecutedPlayModeType = settings.PlayMode;
+
+    // Only apply NetMode/RunUnderOneProcess when the caller went through the structured
+    // RdPlaySettings path. Legacy int-packed callers leave bApplyNetMode=false so we don't
+    // clobber the user's editor-config values with our defaults.
+    if (settings.bApplyNetMode)
+    {
+        PlayInSettings->SetPlayNetMode(settings.NetMode);
+        PlayInSettings->SetRunUnderOneProcess(settings.bRunUnderOneProcess);
+    }
 
     PlayInSettings->PostEditChange();
     PlayInSettings->SaveConfig();
@@ -332,35 +380,35 @@ FRiderGameControl::FRiderGameControl(rd::Lifetime Lifetime, JetBrains::EditorPlu
     Lifetime->bracket(
         [this]()
         {
-            BeginPIEHandle = FEditorDelegates::BeginPIE.AddLambda([this](const bool)
+            BeginPIEHandle = RIDERLINK_PIE_BEGIN.AddLambda([this](const bool)
             {
                 ScheduleModelAction([](RdEditorModel const& model)
                 {
                     model.get_playStateFromEditor().fire(PlayState::Play);
                 });
             });
-            EndPIEHandle = FEditorDelegates::EndPIE.AddLambda([this](const bool)
+            EndPIEHandle = RIDERLINK_PIE_END.AddLambda([this](const bool)
             {
                 ScheduleModelAction([](RdEditorModel const& model)
                 {
                     model.get_playStateFromEditor().fire(PlayState::Idle);
                 });
             });
-            PausePIEHandle = FEditorDelegates::PausePIE.AddLambda([this](const bool)
+            PausePIEHandle = RIDERLINK_PIE_PAUSE.AddLambda([this](const bool)
             {
                 ScheduleModelAction([](RdEditorModel const& model)
                 {
                     model.get_playStateFromEditor().fire(PlayState::Pause);
                 });
             });
-            ResumePIEHandle = FEditorDelegates::ResumePIE.AddLambda([this](const bool)
+            ResumePIEHandle = RIDERLINK_PIE_RESUME.AddLambda([this](const bool)
             {
                 ScheduleModelAction([](RdEditorModel const& model)
                 {
                     model.get_playStateFromEditor().fire(PlayState::Play);
                 });
             });
-            SingleStepPIEHandle = FEditorDelegates::SingleStepPIE.AddLambda([this](const bool)
+            SingleStepPIEHandle = RIDERLINK_PIE_STEP.AddLambda([this](const bool)
             {
                 ScheduleModelAction([](RdEditorModel const& model)
                 {
@@ -390,11 +438,11 @@ FRiderGameControl::FRiderGameControl(rd::Lifetime Lifetime, JetBrains::EditorPlu
         [this]()
         {
             FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(OnObjectPropertyChangedHandle);
-            FEditorDelegates::SingleStepPIE.Remove(SingleStepPIEHandle);
-            FEditorDelegates::ResumePIE.Remove(ResumePIEHandle);
-            FEditorDelegates::PausePIE.Remove(PausePIEHandle);
-            FEditorDelegates::EndPIE.Remove(EndPIEHandle);
-            FEditorDelegates::BeginPIE.Remove(BeginPIEHandle);
+            RIDERLINK_PIE_STEP.Remove(SingleStepPIEHandle);
+            RIDERLINK_PIE_RESUME.Remove(ResumePIEHandle);
+            RIDERLINK_PIE_PAUSE.Remove(PausePIEHandle);
+            RIDERLINK_PIE_END.Remove(EndPIEHandle);
+            RIDERLINK_PIE_BEGIN.Remove(BeginPIEHandle);
         }
     );
 
@@ -444,6 +492,17 @@ FRiderGameControl::FRiderGameControl(rd::Lifetime Lifetime, JetBrains::EditorPlu
                              = GetMutableDefault<ULevelEditorPlaySettings>();
                          check(PlayInSettings);
                          const FPlaySettings NewSettings = FPlaySettings::UnpackFromMode(mode);
+                         UpdateSettings(PlayInSettings, NewSettings);
+                     }
+             );
+
+        Model.get_playSettingsFromRider()
+             .advise(Lifetime, [this](JetBrains::EditorPlugin::PlaySettings const& rdSettings)
+                     {
+                         ULevelEditorPlaySettings* PlayInSettings
+                             = GetMutableDefault<ULevelEditorPlaySettings>();
+                         check(PlayInSettings);
+                         const FPlaySettings NewSettings = FPlaySettings::FromRdStruct(rdSettings);
                          UpdateSettings(PlayInSettings, NewSettings);
                      }
              );

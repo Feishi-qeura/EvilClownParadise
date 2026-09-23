@@ -20,6 +20,7 @@ public class RiderLink : ModuleRules
 		PublicDependencyModuleNames.Add("Core");
 		PublicDependencyModuleNames.Add("RD");
 		string[] Paths = {
+			"Public/Model",
 			"Public/Model/Library",
 			"Public/Model/RdEditorProtocol",
 		};

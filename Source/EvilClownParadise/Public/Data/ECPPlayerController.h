@@ -1,83 +1,127 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+// Enhanced Input 由控制器集中绑定，角色负责校验状态和服务器权威玩法。
 #pragma once
 
+#include "Actors/ECPPickupTypes.h"
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
 #include "ECPPlayerController.generated.h"
 
 class ACharacter;
+class AECPCharBase;
+class AECPPlayerBase;
+class AECPPickupItem;
 class UInputAction;
 class UInputMappingContext;
 class UEnhancedInputLocalPlayerSubsystem;
 struct FInputActionValue;
 
-// 每个输入动作使用独立属性；蓝图配置资源，C++ 逐项绑定处理函数。
 UCLASS()
 class EVILCLOWNPARADISE_API AECPPlayerController : public APlayerController
 {
 	GENERATED_BODY()
 
 public:
-	// 复用现有 IMC，允许蓝图更换映射而无需改动 C++ 路径。
+	// 排名只由服务器 GameMode 写入；客户端没有仲裁权，因此无需增加复制字段。
+	void SetPickupJoinOrder(int32 InJoinOrder, bool bInListenServerHost);
+	int32 GetPickupJoinOrder() const { return PickupJoinOrder; }
+	bool IsPickupListenServerHost() const { return bPickupListenServerHost; }
+	FECPPickupPriority GetPickupPriority(uint64 ServerFrame, uint32 ArrivalOrder) const;
+
+	// 复制状态到达和 Pawn 切换后都可幂等刷新；公开入口也便于角色 RepNotify 主动通知。
+	void RefreshPickupInputMode();
+	bool IsPickupInputModeActive() const { return bPickupInputModeActive; }
+
+	// 复用现有 IMC；资源由蓝图配置，不改变项目当前输入资源路径。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputMappingContext> InputMapping;
 
-	// 移动使用 Axis2D，沿用 X 前后、Y 左右的现有轴约定。
+	// 沿用 X 前后、Y 左右的 Axis2D 约定。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> MoveAction;
 
-	// 视角使用 Axis2D，分别读取鼠标水平和垂直位移。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> LookAction;
 
-	// 下蹲在开始按下时切换一次，按住不重复切换。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> CrouchAction;
 
-	// 跳跃开始时提出请求，松开或取消时停止持续跳跃；未配置时不启用。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	TObjectPtr<UInputAction> JumpAction;
 
-	// 默认与原 AddMappingContext 节点一致，数值越大优先级越高。
+	// Run 处理按下、松开、取消，避免失去焦点之后仍保持跑步。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
+	TObjectPtr<UInputAction> RunAction;
+
+	// Ragdoll 和 Pickup 仅处理 Started，一次按键只提出一次状态改变。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
+	TObjectPtr<UInputAction> RagdollAction;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
+	TObjectPtr<UInputAction> PickupAction;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	int32 InputMappingPriority = 0;
 
-	// 沿用蓝图的 0.2 倍率；负值可反转对应视角轴。
+	// 鼠标是每帧位移，不额外乘 DeltaSeconds；保留旧蓝图 0.2 倍率。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input")
 	FVector2D LookSensitivity = FVector2D(0.2, 0.2);
 
-	// 保留原移动轴打印，并允许通过蓝图关闭调试输出。
+	// 鼠标位移是每帧像素增量，不乘 DeltaSeconds；这是控制器基础值，物品蓝图还会叠加自己的速度倍率。
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input|Pickup", meta = (ClampMin = "0.01"))
+	float PickupRotationSensitivity = 0.25f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input|Pickup", meta = (ClampMin = "1.0", ClampMax = "60.0"))
+	float PickupRotationSendRate = 20.f;
+
+	// 高频打印会干扰网络/帧时间观察；调试时可临时开启，正常玩法默认关闭。
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ECP|Input|Debug")
-	bool bPrintMovementInput = true;
+	bool bPrintMovementInput = false;
 
 protected:
-	// 为当前本地玩家启用映射，不依赖蓝图缓存 Pawn 的时机。
 	virtual void BeginPlay() override;
-
-	// 控制器的输入绑定入口，保留父类初始化。
 	virtual void SetupInputComponent() override;
-
-	// 退出时只移除本类安装的映射，保留 UI 等其他上下文。
+	virtual void PlayerTick(float DeltaTime) override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
-	// 回调始终获取当前 Pawn，避免重生后继续访问旧角色。
+	// 每次读取当前 Pawn，重生和切换角色后无需重建输入绑定。
 	void Move(const FInputActionValue& Value);
 	void Look(const FInputActionValue& Value);
 	void ToggleCrouch();
-
-	// 跳跃开始与结束分开处理，支持按住跳得更高的 Character 配置。
 	void StartJump();
 	void StopJump();
+	void StartRunning();
+	void StopRunning();
+	void ToggleRagdoll();
+	void Pickup();
+	void EquipPickup();
+	void StorePickup();
+	void PlacePickup();
+	void DropPickup();
+	void BeginRotatePickup();
+	void EndRotatePickup();
+	bool IsInspectingPickup() const;
+	void RestorePickupInputMode();
 
-	// 记录开始跳跃的角色；切换 Pawn 后松开按键时仍清理原角色的跳跃请求。
+	// 松开事件应清理原来按下时的角色，不能把旧按键误发给新 Pawn。
 	TWeakObjectPtr<ACharacter> JumpingCharacter;
+	TWeakObjectPtr<AECPCharBase> RunningCharacter;
 
-	// 记录本类实际安装的资源，避免清理其他系统的输入映射。
 	UPROPERTY(Transient)
 	TObjectPtr<UInputMappingContext> InstalledInputMapping;
-
-	// 本地玩家先销毁时弱引用自动失效，清理阶段不访问悬空子系统。
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> InputSubsystem;
+	int32 PickupJoinOrder = MAX_int32;
+	bool bPickupListenServerHost = false;
+	bool bPickupInputModeActive = false;
+	bool bSavedCursorVisible = false;
+	bool bRotatingPickup = false;
+	double LastPickupRotationSendTime = -1.0;
+	// 拖动绑定按下时的 Pawn/物品/代际；途中换 Pawn 或换物品只会取消，不能转发旧输入。
+	TWeakObjectPtr<AECPPlayerBase> RotatingPickupPlayer;
+	TWeakObjectPtr<AECPPickupItem> RotatingPickupItem;
+	FECPInspectionRotationSample PickupRotationSample;
+	uint32 NextPickupRotationSession = 0;
+	uint32 LastSentPickupRotationSequence = 0;
+	FRotator PickupRotationStart = FRotator::ZeroRotator;
+	FRotator PickupRotationTotal = FRotator::ZeroRotator;
 };

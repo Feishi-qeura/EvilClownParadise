@@ -10,7 +10,8 @@ public class EvilClownParadise : ModuleRules
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "NavigationSystem", "StateTreeModule", "GameplayTasks","EnhancedInput" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] {"GameplayStateTreeModule"});
+		// 玩家父类负责原蓝图的本地网络调试控件，专服不会创建 UI。
+		PrivateDependencyModuleNames.AddRange(new string[] {"GameplayStateTreeModule", "UMG", "NetCore"});
 		
 		//显式加载Steam在线服务模块
 		
@@ -24,7 +25,7 @@ public class EvilClownParadise : ModuleRules
 		
 		// Uncomment if you are using online features
 		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
-
+		
 		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
 	}
 }
