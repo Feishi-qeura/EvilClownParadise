@@ -2,7 +2,8 @@
 
 #include "AI/ECPTaskAttack.h"
 
-#include "AI/ECPAIController.h"
+// 合并保留 SANC 的 AI 控制器及原 Data 路径，攻击任务继续使用同一控制器接口。
+#include "Data/ECPAIController.h"
 #include "AI/ECPStateTreeCommon.h"
 #include "Characters/ECPMonsterBase.h"
 

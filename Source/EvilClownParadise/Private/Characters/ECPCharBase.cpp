@@ -1,18 +1,27 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #include "Characters/ECPCharBase.h"
-
 #include "Components/CapsuleComponent.h"
-#include "Debug/DebugHelper.h"
-#include "ECPCore.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/Engine.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 
-AECPCharBase::AECPCharBase(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
+AECPCharBase::AECPCharBase()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	// 只在布娃娃、空中或落地锁定期间开 Tick；采样在本帧物理解算之后。
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
+	PrimaryActorTick.TickGroup = TG_PostPhysics;
+	bReplicates = true;
+	GetMesh()->bEnablePhysicsOnDedicatedServer = true;
 }
 
-void AECPCharBase::BeginPlay() { Super::BeginPlay(); }
+void AECPCharBase::BeginPlay()
+{
+	Super::BeginPlay();
+	MeshRelativeBeforeRagdoll = GetMesh()->GetRelativeTransform();
+	CacheSkeleton();
+	UpdateTickEnabled();
+}
 
 void AECPCharBase::PostInitializeComponents()
 {
@@ -25,73 +34,57 @@ void AECPCharBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AECPCharBase, CurrentHealth);
 	DOREPLIFETIME(AECPCharBase, bIsDead);
+	DOREPLIFETIME(AECPCharBase, MotionState);
+	DOREPLIFETIME(AECPCharBase, bRunningRequested);
 }
 
-float AECPCharBase::TakeDamage(float DamageAmount, const struct FDamageEvent& DamageEvent,
-                               class AController* EventInstigator, AActor* DamageCauser)
+float AECPCharBase::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent,
+	AController* EventInstigator, AActor* DamageCauser)
 {
-	if (!HasAuthority() || bIsDead || DamageAmount <= 0.f)
-	{
-		return 0.f;
-	}
-
+	// 伤害只由服务器结算，避免每个客户端分别扣血和重复死亡。
+	if (!HasAuthority() || bIsDead || DamageAmount <= 0.f) return 0.f;
 	const float OldHealth = CurrentHealth;
 	CurrentHealth = FMath::Clamp(CurrentHealth - DamageAmount, 0.f, MaxHealth);
-	// 实际生效的伤害：血量夹取后与请求值不同（过量击杀、已满血时的部分伤害）
-	const float AppliedDamage = OldHealth - CurrentHealth;
 	BroadcastHealthChange(OldHealth, CurrentHealth);
-
 	if (CurrentHealth <= 0.f)
 	{
 		bIsDead = true;
-		ApplyDeathState();
+		OnRep_IsDead();
 		AActor* Killer = (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser;
-		UE_LOG(LogECP, Log, TEXT("%s 死亡，凶手：%s"), *GetName(), Killer ? *Killer->GetName() : TEXT("未知"));
+		UE_LOG(LogTemp, Warning, TEXT("%s 死亡，凶手：%s"), *GetName(), Killer ? *Killer->GetName() : TEXT("未知"));
 		HandleDied(Killer);
 	}
-	else
+	else if (GEngine)
 	{
-		DebugHelper::Print(FString::Printf(TEXT("%s 受到 %.1f 伤害，剩余血量 %.1f / %.1f"), *GetName(), AppliedDamage,
-		                                   CurrentHealth, MaxHealth),
-		                   5.f, FColor::Cyan);
+		// 专用服务器没有屏幕调试引擎实例，保留原反馈但不解引用空指针。
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Cyan, FString::Printf(TEXT("%s 受到 %.1f 伤害，剩余血量 %.1f / %.1f"), *GetName(), DamageAmount, CurrentHealth, MaxHealth));
 	}
-
-	return AppliedDamage;
+	return DamageAmount;
 }
 
-void AECPCharBase::HandleDied_Implementation(AActor* Killer) { OnDied.Broadcast(Killer); }
-
-void AECPCharBase::ApplyDeathState()
+void AECPCharBase::HandleDied_Implementation(AActor* Killer)
 {
-	// 死亡瞬间角色可能已被销毁（例如同帧内的多次伤害结算），胶囊体不一定还在
-	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
-	{
-		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	}
-	if (!HasAuthority())
-	{
-		OnDied.Broadcast(nullptr); // 远程客户端拿不到凶手，死亡UI表现够用
-	}
+	OnDied.Broadcast(Killer);
 }
 
 void AECPCharBase::OnRep_IsDead()
 {
-	if (!bIsDead)
-	{
-		return;
-	}
-	ApplyDeathState();
+	if (!bIsDead) return;
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (!HasAuthority()) OnDied.Broadcast(nullptr);
 }
 
 void AECPCharBase::BroadcastHealthChange(float OldHealth, float NewHealth)
 {
 	OnHealthChanged.Broadcast(OldHealth, NewHealth);
-	// key=1 覆盖刷新同一行，形成常驻血量显示；正式血条UI做好后删掉这一行
-	DebugHelper::PrintPersistent(1, FString::Printf(TEXT("血量：%.1f / %.1f"), CurrentHealth, MaxHealth));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(1, 5.f, FColor::Yellow, FString::Printf(TEXT("血量：%.1f / %.1f"), CurrentHealth, MaxHealth));
+	}
 }
 
 void AECPCharBase::OnRep_CurrentHealth()
 {
-	// 客户端拿不到精确旧值，UI盯新值即可
+	// 客户端继续使用现有生命值通知接口，迁移布娃娃不改变生命系统契约。
 	OnHealthChanged.Broadcast(CurrentHealth, CurrentHealth);
 }
