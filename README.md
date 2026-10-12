@@ -34,39 +34,39 @@ cd EvilClownParadise
 
 | 目录 | 内容 | 是否入库 |
 |---|---|---|
-| `Content/_Game/` | 游戏正式资产 | ✅ |
+| `Content/Project/` | Character、Interaction、AI、Online、World、Shared 等正式功能资源 | ✅ |
+| `Content/zxx/BMMCSystem/` | 受保护模板与地图，全部原位保留 | ✅ |
+| `Content/` 的素材包目录 | 现有素材原件与演示内容；正式关卡资源集中在 Project | ✅ |
 | `Content/Developers/<个人名>/` | 个人沙盒（磁盘保留，仅本机使用） | ❌ |
+| `Plugins/ECPFoundation/` | 普通常驻插件：公共契约、GameInstance、统一功能注册入口 | ✅ |
+| `Plugins/GameFeatures/` | ECPCharacter、ECPInteraction、ECPAI、ECPOnline、ECPWorld 的 C++、描述及功能数据 | ✅ |
 | `Plugins/FUOnlineSession/` | 自研 Steam/Null 会话插件（Source + Config） | ✅ |
 | `docs/` | 团队规范文档 | ✅ |
 
-学习/演示素材不入库，且已从磁盘移出；完整副本在 `E:\UnrealProjects\ECP_Archive`（仅本地保留）。
+项目采用功能插件与 Project 内容双层布局。C++ 与功能数据位于插件，蓝图和玩法资源位于所属 Project 目录。当前生产流程包含主菜单 Test_Map、原位保留的 BMMC 联机大厅与 Project/World/Maps/Demo。旧迁移备份和部分旧路径已在后续整理中移除；原生反射 CoreRedirects 继续保留。
 
 > 让一个已跟踪的目录"出库"只有一条路：`git rm -r --cached <路径>`。
 > 改 `.gitignore` 对已跟踪文件无效——`Content/Developers` 曾因此"文档说不入库、实际入库 171 个"。
+> BMMC 生产大厅必须继续入库，不适用个人沙盒的出库规则。
 
-## 团队规范（docs/）
+## 当前开发与验证记录（docs/）
 
 | 文档 | 内容 |
 |---|---|
-| [docs/branching.md](docs/branching.md) | 分支模型：功能分支短命合并，禁止按人开长活分支 |
-| [docs/commits.md](docs/commits.md) | 提交规范：Conventional Commits，禁止无信息提交 |
-| [docs/code-style.md](docs/code-style.md) | C++ 规范：Epic 标准之上的项目约定 |
-| [docs/content.md](docs/content.md) | Content 目录结构、资产命名、资产协作与批量迁移的正确做法 |
-| [docs/ci.md](docs/ci.md) | 自托管 runner 与 CI 设置 |
-| [docs/tech-debt.md](docs/tech-debt.md) | 技术债与后续任务清单（完成请勾选） |
+| [GameFeature 设计](docs/superpowers/specs/2026-09-23-game-features-design.md) | 模块职责、依赖和统一启动入口；历史迁移数量不代表当前资源清单 |
+| [拾取、负重与布娃娃搬运](docs/superpowers/specs/2026-10-09-unified-pickup-load-ragdoll-carry-design.md) | 交互与公共角色规则 |
+| [Project 内容整理](docs/project-content-cleanup-2026-10-12.md) | 三张生产关卡、环境资源与引用整理 |
+| [多人切图](docs/level-travel-2026-10-12.md) | BP_Actor 服务器切图接口与真实双端 PIE 验证 |
 
 ## CI
 
 push 到 `main` / `ZANEN` 或 PR 到 `main` 时自动编译 Editor + Game 两个目标，
-需要一台自托管 Windows runner（设置见 [docs/ci.md](docs/ci.md)）。
+需要带 `self-hosted`、`windows`、`ue5` 标签的自托管 Windows runner，安装 UE 5.8、Git LFS 和项目所需编辑器插件，并通过 `UE_ROOT` 环境变量提供引擎目录。
 
 ## 改资产的规矩（速记）
 
-1. **锁再改**：`git lfs lock <路径>` → 编辑 → `git lfs unlock <路径>`。
-   这不是自觉要求：`.gitattributes` 标了 `lockable`，**Git LFS 会把未加锁的 `.uasset`/`.umap`
-   在工作区设为只读**，不加锁保存会报 `Cannot remove '...' as it is read only!` 且改动静默丢失。
-2. 启动地图只允许指向 `Content/_Game`，不得指向个人沙盒——那不入库，同事拉库必报错。
-3. 类改名 = C++ 改名 + 编辑器 Fix Up Redirectors + 重存资产 + **删除对应的 CoreRedirects**。
-4. 关闭编辑器再对 Content 目录做移动 / 删除类操作。
-5. 迁移被引用的资产不要用脚本 `rename_asset` / `consolidate_assets`，会静默损坏引用；
-   正确做法见 [docs/content.md](docs/content.md) 的"批量迁移被引用的资产"。
+1. **先锁再改**：例如 `git lfs lock Content/Project/Interaction/Player/BP_ECPlayertest.uasset`；编辑、保存并检查差异，提交和交接后释放同一文件的锁。逐个锁定实际修改的文件，不用通配符锁目录；只读保存报错不能当作成功。
+2. 新增正式地图放 `Content/Project/World`，不得依赖不入库的个人沙盒。当前默认地图为 `Project/World/Maps/LegacyZxx/Test_Map`，BMMC 原位地图继续保留。
+3. 保留对应 CoreRedirects；禁止全局 Fix Up Redirectors，不为清理引用批量重存 BMMC 模板或其他引用方。整理资源前先核对当前引用与备份。
+4. 新玩法资源写入所属 `Content/Project/<功能>/`；移动或改名必须通过编辑器资产接口核对引用和保存范围，不能直接在文件系统里移动二进制包。
+5. GameFeature 与 Project 内容迁移已执行，专用迁移工具不能重复作为日常整理命令使用。当前资源整理和恢复说明见上述 Project 内容整理记录。

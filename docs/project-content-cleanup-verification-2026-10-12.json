@@ -1,0 +1,27 @@
+{
+  "copiedPackages": 378,
+  "deletedPackages": [
+    "/Game/Project/Interaction/Framework/LegacyGame/GM_InGame",
+    "/Game/Project/Interaction/Framework/LegacyGame/PC_InGame",
+    "/Game/Project/Interaction/Input/LegacyGame/IMC_Player",
+    "/Game/Project/Interaction/Input/LegacyGame/InputAction/IA_Crouch",
+    "/Game/Project/Interaction/Input/LegacyGame/InputAction/IA_Jump",
+    "/Game/Project/Interaction/Input/LegacyGame/InputAction/IA_Look",
+    "/Game/Project/Interaction/Input/LegacyGame/InputAction/IA_Move",
+    "/Game/Project/Interaction/Input/LegacyGame/InputAction/IA_Sprint",
+    "/Game/Project/World/Maps/L_Test"
+  ],
+  "projectAssetsBefore": 269,
+  "projectAssetsAfter": 638,
+  "externalFilesVerified": 2099,
+  "changedExternalFiles": [],
+  "newExternalFiles": [],
+  "remainingDeletedPackageReferences": {},
+  "remainingSourceFolderDependencies": [],
+  "missingCopiedPackages": [],
+  "newMissingDependencies": [],
+  "projectMaps": [
+    "/Game/Project/World/Maps/Demo",
+    "/Game/Project/World/Maps/LegacyZxx/Test_Map"
+  ]
+}

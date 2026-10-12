@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-12",
+  "base": "9773a5425d2e38f11043b2ec095e14b2adec0917",
+  "build": {
+    "game": "Succeeded",
+    "editor": "Succeeded"
+  },
+  "automation": {
+    "passed": 117,
+    "processExitCode": 0,
+    "passedWithWarnings": 12,
+    "report": "Saved/GitPublishValidation/AutomationGreen/index.json",
+    "notRun": 0,
+    "failed": 0
+  },
+  "cook": {
+    "errors": 0,
+    "maps": [
+      "/Game/Project/World/Maps/LegacyZxx/Test_Map",
+      "/Game/zxx/BMMCSystem/Maps/SinglePlayer/SinglePlayerMap",
+      "/Game/Project/World/Maps/Demo"
+    ],
+    "log": "Saved/GitPublishValidation/cook.log",
+    "warnings": 28,
+    "processExitCode": 0
+  },
+  "lfs": {
+    "localBytes": 6814518881,
+    "pointerAndLocalSizeAudit": "Passed",
+    "uniqueObjects": 2999,
+    "binaryPointers": 2999
+  },
+  "review": {
+    "critical": 0,
+    "important": 0,
+    "scope": "Current runtime asset test, PIE cleanup, Online boundary, CI fallback and README"
+  },
+  "limitations": [
+    "Native visual asset review and two-machine Steam acceptance were not run.",
+    "Cook retains 28 inherited warnings including the documented M_Decal_7 material input.",
+    "Local builds and automation are not a remote CI result."
+  ],
+  "fixes": [
+    "Replace retired one-off migration document assertions with live runtime asset checks.",
+    "Restore player Blueprint debug trace default to false.",
+    "Clean known context-free PIE source worlds before later full garbage collection.",
+    "Restore LFS attributes and CI; fix Game build UE_ROOT fallback and stale README links."
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "ECPAI",
+  "Description": "基于共享角色契约的怪物感知与 StateTree 决策。",
+  "Category": "Game Features",
+  "CanContainContent": true,
+  "ExplicitlyLoaded": true,
+  "BuiltInInitialFeatureState": "Active",
+  "Modules": [
+    {
+      "Name": "ECPAI",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "GameFeatures",
+      "Enabled": true
+    },
+    {
+      "Name": "ECPFoundation",
+      "Enabled": true
+    },
+    {
+      "Name": "ECPCharacter",
+      "Enabled": true
+    },
+    {
+      "Name": "GameplayStateTree",
+      "Enabled": true
+    }
+  ],
+  "EnabledByDefault": false
+}

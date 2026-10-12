@@ -11,6 +11,8 @@
 #include "IpConnection.h"
 #include "IpNetDriver.h"
 #include "UObject/StrongObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 #include "HAL/PlatformProcess.h"
 #include <limits>
 
@@ -34,6 +36,13 @@ namespace
 
 		~FSessionStatusFixture()
 		{
+			// 无 Socket 的采样夹具先标记闭态，避免正式清理期间尝试发送关闭报文。
+			// Closed 只改变连接状态，不能替代下方更新 ClientLoginState 的 CleanUp。
+			if (Connection)
+			{
+				Connection->SetConnectionState(USOCK_Closed);
+			}
+
 			// 模拟关卡结束，给生产清理回调执行机会，再解除测试构造的网络引用。
 			FWorldDelegates::OnWorldBeginTearDown.Broadcast(World);
 			if (Action.IsValid())
@@ -41,15 +50,17 @@ namespace
 				World->GetTimerManager().ClearAllTimersForObject(Action.Get());
 				Action->SetReadyToDestroy();
 			}
+			// CleanUp 更新独立的登录清理态时仍会读取 Driver，然后自行解除连接引用。
+			// 必须在 Driver/World 解绑前完成首次清理，后续 GC 才能安全重复调用。
+			if (Connection)
+			{
+				Connection->CleanUp();
+			}
 			World->SetNetDriver(nullptr);
 			if (Driver)
 			{
 				Driver->ServerConnection = nullptr;
 				Driver->SetWorld(nullptr);
-			}
-			if (Connection)
-			{
-				Connection->Driver = nullptr;
 			}
 			World->DestroyWorld(false);
 		}
@@ -265,5 +276,32 @@ bool FFUSessionStatusNoTimeoutTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-#endif
+// 必须在夹具及其强引用全部离开作用域后触发完整 GC，才能覆盖测试通过后才发生的清理崩溃。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFUSessionStatusFixtureGarbageCollectionTest, "FUOnlineSession.Ping.FixtureGarbageCollection", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FFUSessionStatusFixtureGarbageCollectionTest::RunTest(const FString& Parameters)
+{
+	// 弱引用只用于观察回收结果，不得为测试对象保活，否则会把有缺陷的清理路径隐藏起来。
+	TWeakObjectPtr<UIpConnection> ConnectionAfterScope;
+	TWeakObjectPtr<UIpNetDriver> DriverAfterScope;
+	TWeakObjectPtr<UFU_CheckSessionStatusAsync> ActionAfterScope;
+	{
+		FSessionStatusFixture Fixture;
+		Fixture.MakeClient();
+		Fixture.AddPlayer(true);
+		Fixture.Start();
+		ConnectionAfterScope = Fixture.Connection;
+		DriverAfterScope = Fixture.Driver;
+		ActionAfterScope = Fixture.Action.Get();
+		TestEqual(TEXT("构造真实客户端采样后再验证析构"), Fixture.Receiver->ClientCount, 1);
+	}
 
+	// 即使连接已 Closed，若首次 CleanUp 延迟到 Driver 解绑后的 GC，登录状态更新仍会崩溃。
+	// 显式 full purge 覆盖已清理连接的再次清理，不依赖编辑器下次自动 GC。
+	CollectGarbage(RF_NoFlags, true);
+	TestFalse(TEXT("夹具退出后连接可安全回收"), ConnectionAfterScope.IsValid());
+	TestFalse(TEXT("夹具退出后驱动可安全回收"), DriverAfterScope.IsValid());
+	TestFalse(TEXT("监测器已解除 GameInstance 保活并可回收"), ActionAfterScope.IsValid());
+	return true;
+}
+
+#endif
