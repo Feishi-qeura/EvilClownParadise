@@ -1,0 +1,28 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "ECP Foundation",
+  "Description": "项目公共契约及唯一 Game Feature 启动入口。",
+  "Category": "ECP",
+  "CanContainContent": false,
+  "Modules": [
+    {
+      "Name": "ECPFoundation",
+      "Type": "Runtime",
+      "LoadingPhase": "PreDefault"
+    },
+    {
+      "Name": "ECPFoundationEditor",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "GameFeatures",
+      "Enabled": true
+    }
+  ],
+  "EnabledByDefault": false
+}

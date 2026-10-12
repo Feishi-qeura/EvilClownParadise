@@ -9,8 +9,7 @@
 			"Type": "Runtime",
 			"LoadingPhase": "Default",
 			"AdditionalDependencies": [
-				"Engine",
-				"AIModule"
+				"Engine"
 			]
 		}
 	],
@@ -63,6 +62,38 @@
 		{
 			"Name": "AndroidFileServer",
 			"Enabled": false
+		},
+		{
+			"Name": "GameFeatures",
+			"Enabled": true
+		},
+		{
+			"Name": "ModularGameplay",
+			"Enabled": true
+		},
+		{
+			"Name": "ECPFoundation",
+			"Enabled": true
+		},
+		{
+			"Name": "ECPCharacter",
+			"Enabled": true
+		},
+		{
+			"Name": "ECPInteraction",
+			"Enabled": true
+		},
+		{
+			"Name": "ECPAI",
+			"Enabled": true
+		},
+		{
+			"Name": "ECPOnline",
+			"Enabled": true
+		},
+		{
+			"Name": "ECPWorld",
+			"Enabled": true
 		}
 	]
 }

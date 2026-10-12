@@ -1,0 +1,63 @@
+#include "Data/ECPAIController.h"
+
+#include "Characters/ECPMonsterBase.h"
+#include "Characters/ECPCharBase.h"
+#include "Components/StateTreeAIComponent.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Perception/AIPerceptionTypes.h"
+#include "Perception/AISenseConfig_Sight.h"
+
+
+AECPAIController::AECPAIController()
+{
+	// 决策：StateTreeAI组件跑在AIC上，附身后自动开始
+	StateTreeAIComp = CreateDefaultSubobject<UStateTreeAIComponent>(TEXT("StateTreeAIComp"));
+	
+	// 眼睛：视觉感知配置
+	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
+	SightConfig -> SightRadius = 1000.f; // 视野范围10m
+	SightConfig -> LoseSightRadius = 1200.f; // 视野丢失范围 > 视野范围，避免在边界抽风
+	SightConfig -> PeripheralVisionAngleDegrees = 60.f; // 视野角度
+	SightConfig -> SetMaxAge(3.f); // 丢失视野后会继续追击3秒
+	SightConfig -> DetectionByAffiliation.bDetectEnemies = true;
+	SightConfig -> DetectionByAffiliation.bDetectFriendlies = true;
+	SightConfig -> DetectionByAffiliation.bDetectNeutrals = true;
+	
+	AIPerceptionComp = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("AIPerceptionComp"));
+	AIPerceptionComp -> ConfigureSense(*SightConfig);
+	AIPerceptionComp -> SetDominantSense(SightConfig -> GetSenseImplementation());
+	PerceptionComponent = AIPerceptionComp;
+}
+
+void AECPAIController::BeginPlay()
+{
+	Super::BeginPlay();
+}
+
+void AECPAIController::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+	if (DefaultStateTree)
+	{
+		StateTreeAIComp -> SetStateTree(DefaultStateTree);
+	}
+	
+	// 事件绑定
+	AIPerceptionComp -> OnTargetPerceptionUpdated.AddDynamic(this, &AECPAIController::OnTargetPerceptionUpdated);
+}
+
+void AECPAIController::OnTargetPerceptionUpdated(AActor* Actor, struct FAIStimulus Stimulus)
+{
+	AECPMonsterBase* Monster = GetPawn<AECPMonsterBase>();
+	// 只依赖共享角色契约；交互插件可以替换玩家实现而不改变 AI 的识别范围。
+	AECPCharBase* Player = Cast<AECPCharBase>(Actor);
+	
+	if (Monster && Player && Player->GetCharacterTeamId() == ECPTeam::Player && !Player->IsDead())
+	{
+		Monster -> SetTarget(Stimulus.WasSuccessfullySensed() ? Player : nullptr);
+		if (Stimulus.WasSuccessfullySensed())
+		{
+			GEngine -> AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, FString::Printf(TEXT("%s看见了玩家：%s"), *Monster -> GetName(), *Player -> GetName()));
+		}
+	}
+}

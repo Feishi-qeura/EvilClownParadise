@@ -1,0 +1,29 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "ECPWorld",
+  "Description": "场景物理推动器和联网世界表现。",
+  "Category": "Game Features",
+  "CanContainContent": true,
+  "ExplicitlyLoaded": true,
+  "BuiltInInitialFeatureState": "Active",
+  "Modules": [
+    {
+      "Name": "ECPWorld",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "GameFeatures",
+      "Enabled": true
+    },
+    {
+      "Name": "ECPFoundation",
+      "Enabled": true
+    }
+  ],
+  "EnabledByDefault": false
+}

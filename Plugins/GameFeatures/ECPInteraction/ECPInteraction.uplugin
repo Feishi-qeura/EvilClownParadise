@@ -1,0 +1,39 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "ECP Interaction",
+  "Description": "玩家输入、拾取、检查、装备与库存交互。保持服务器权威裁决和既有复制协议。",
+  "Category": "Game Features",
+  "CanContainContent": true,
+  "IsBetaVersion": false,
+  "Installed": false,
+  "ExplicitlyLoaded": true,
+  "BuiltInInitialFeatureState": "Active",
+  "Modules": [
+    {
+      "Name": "ECPInteraction",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "GameFeatures",
+      "Enabled": true
+    },
+    {
+      "Name": "ECPFoundation",
+      "Enabled": true
+    },
+    {
+      "Name": "ECPCharacter",
+      "Enabled": true
+    },
+    {
+      "Name": "EnhancedInput",
+      "Enabled": true
+    }
+  ],
+  "EnabledByDefault": false
+}
